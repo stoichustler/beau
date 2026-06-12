@@ -5,7 +5,7 @@ machine, GICv3, EL2 virtualization enabled, and 8 physical CPUs. Use the
 wrapper script for the default QEMU launch:
 
 ```bash
-./scripts/kick.sh
+./scripts/kick.py
 ```
 
 The wrapper expands to the ARM64 QEMU `virt` command with:
@@ -24,8 +24,8 @@ qemu-system-aarch64 \
 Build with the local bare-metal toolchain:
 
 ```bash
-PATH=/home/beau/clan-arm64-none-elf/bin:$PATH \
-make ARCH=arm64 PLATFORM=qemu CROSS_COMPILE=aarch64-none-elf-
+./scripts/kick.py --toolchains /path/to/clan-arm64-none-elf/bin --build --dry-run
+./scripts/kick.py --toolchains /path/to/clan-arm64-none-elf/bin --build
 ```
 
 Current QEMU VM layout:
@@ -55,8 +55,9 @@ late guest AP bring-up; press Enter after the boot logs settle to show the
 ## Implemented
 
 - ARM64 build path for the QEMU `virt` platform.
-- `scripts/kick.sh` QEMU launcher with `--kernel`, `--qemu`, `--smp`, `--memory`,
-  `--dry-run`, and extra QEMU argument support.
+- `scripts/kick.py` QEMU launcher with `--kernel`, `--qemu`, `--smp`,
+  `--memory`, `--toolchains`, `--cross-prefix`, `--build`, `--dry-run`, and
+  extra QEMU argument support.
 - QEMU platform code and static board/scenario configuration under
   `arch/arm64/platform/qemu`.
 - Bare-boot image embedding for both LK and Zephyr raw images.
@@ -277,7 +278,7 @@ virtualization port.
    `.incbin` image embedding, then clear `GUEST_FLAG_NO_FW` for Linux guests.
 2. Extend vGICv3 coverage for routing, active-state handling, redistributor SGI
    and PPI registers, and remaining distributor registers used by richer guests.
-3. Add a repeatable boot regression script that checks build, `scripts/kick.sh`
+3. Add a repeatable boot regression script that checks build, `scripts/kick.py`
    launch, VM states, Zephyr `zero ~>`, LK `beau ~>`, `vmap`, and `irqs`.
 4. Move QEMU platform memory and device discovery toward host-FDT-derived data
    where it helps reduce static board assumptions.

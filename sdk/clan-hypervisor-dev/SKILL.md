@@ -26,8 +26,8 @@ description: Develop, debug, validate, and document the CLAN hypervisor in this 
 4. Validate before final response:
    - Build ARM64 QEMU:
      ```bash
-     PATH=/home/beau/clan-arm64-none-elf/bin:$PATH \
-     make ARCH=arm64 PLATFORM=qemu CROSS_COMPILE=aarch64-none-elf- -j$(nproc)
+     ./scripts/kick.py --toolchains /path/to/clan-arm64-none-elf/bin --build --dry-run
+     ./scripts/kick.py --toolchains /path/to/clan-arm64-none-elf/bin --build
      ```
    - For debug/shell/console changes, force rebuild stale debug artifacts first:
      ```bash
@@ -35,9 +35,9 @@ description: Develop, debug, validate, and document the CLAN hypervisor in this 
      ```
    - Check QEMU command:
      ```bash
-     ./scripts/kick.sh --dry-run
+     ./scripts/kick.py --dry-run
      ```
-   - Run `./scripts/kick.sh` for boot/runtime validation when behavior changes.
+   - Run `./scripts/kick.py` for boot/runtime validation when behavior changes.
 
 ## Common Tasks
 

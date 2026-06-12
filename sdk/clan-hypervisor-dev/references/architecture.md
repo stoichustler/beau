@@ -3,7 +3,7 @@
 ## Repository Map
 
 - `Makefile`: static ARM64 QEMU config path when `ARCH=arm64 PLATFORM=qemu`.
-- `scripts/kick.sh`: QEMU launcher for `build/acrn.out`.
+- `scripts/kick.py`: QEMU launcher for `build/acrn.out`.
 - `arch/arm64/platform/qemu`: QEMU board/scenario, static VM config, embedded RTOS images, platform helpers.
 - `arch/arm64/guest`: stage-2 VM setup, vCPU entry/exit, vGICv3, vPL011, hypercall handling.
 - `core`: common VM, vCPU, scheduler, timer, hypercall, and MMIO request logic.
@@ -16,8 +16,8 @@
 Build:
 
 ```bash
-PATH=/home/beau/clan-arm64-none-elf/bin:$PATH \
-make ARCH=arm64 PLATFORM=qemu CROSS_COMPILE=aarch64-none-elf- -j$(nproc)
+./scripts/kick.py --toolchains /path/to/clan-arm64-none-elf/bin --build --dry-run
+./scripts/kick.py --toolchains /path/to/clan-arm64-none-elf/bin --build
 ```
 
 When editing `sdk/debug/*`, stale archive dependencies may hide source changes.
@@ -25,20 +25,20 @@ Force a debug rebuild before validation:
 
 ```bash
 rm -f build/modules/libdebug.a build/acrn.out build/acrn.bin
-PATH=/home/beau/clan-arm64-none-elf/bin:$PATH \
+PATH=/path/to/clan-arm64-none-elf/bin:$PATH \
 make ARCH=arm64 PLATFORM=qemu CROSS_COMPILE=aarch64-none-elf- -j$(nproc)
 ```
 
 Run:
 
 ```bash
-./scripts/kick.sh
+./scripts/kick.py
 ```
 
 Dry run:
 
 ```bash
-./scripts/kick.sh --dry-run
+./scripts/kick.py --dry-run
 ```
 
 Default QEMU shape:

@@ -738,7 +738,6 @@ static int32_t handle_sysreg(struct acrn_vcpu *vcpu)
 static int32_t handle_wfx(struct acrn_vcpu *vcpu)
 {
 	bool is_wfe = ESR_WFX_IS_WFE(vcpu->arch.regs.esr);
-	bool timer_rescue_wfi = !is_wfe && vcpu->arch.vtimer_wfi_rescue;
 	bool pending_irq;
 	bool irq_masked;
 	bool request_pending;
@@ -762,11 +761,19 @@ static int32_t handle_wfx(struct acrn_vcpu *vcpu)
 	irq_masked = ((vcpu->arch.regs.spsr & DAIF_IRQ) != 0UL);
 	request_pending = vcpu_has_pending_request(vcpu);
 	should_yield = is_wfe || (!request_pending && (!pending_irq || irq_masked));
-	if (timer_rescue_wfi) {
+	if (!is_wfe && vcpu->arch.vtimer_wfi_rescue) {
 		if (pending_irq && irq_masked) {
 			vcpu->arch.vtimer_lr_rescue = true;
 			vcpu->arch.gctx.hcr_el2 |= HCR_TWI;
 			arm64_vgicv3_update_current_vtimer(vcpu);
+			/*
+			 * The rescue trap is only needed to advance this WFI and rebuild a
+			 * pending timer LR. After that, let EL1 run through the idle return
+			 * path and unmask IRQs naturally while keeping the LR rescue marker
+			 * until timer EOI or line-low cleanup.
+			 */
+			vcpu->arch.vtimer_wfi_rescue = false;
+			vcpu->arch.gctx.hcr_el2 &= ~HCR_TWI;
 			should_yield = false;
 		} else {
 			vcpu->arch.vtimer_wfi_rescue = false;
@@ -805,9 +812,9 @@ static int32_t handle_wfx(struct acrn_vcpu *vcpu)
 	 * This handler is non-default diagnostic plumbing because QEMU 3OS leaves
 	 * HCR_EL2.TWI/TWE clear. If a diagnostic mode enables the traps, keep the
 	 * behavior lightweight: WFE yields, and WFI yields only when no immediately
-	 * useful virtual event is visible. The timer rescue path keeps TWI armed
-	 * only while a pending virtual IRQ is still masked by guest PSTATE.I, so
-	 * repeated guest WFI instructions cannot consume the pending-only timer LR.
+	 * useful virtual event is visible. The timer rescue path uses TWI only to
+	 * trap the next WFI and rebuild a pending timer LR; after that the LR rescue
+	 * marker protects the pending-only LR until EL1 unmasks and EOIs the timer.
 	 */
 	if (should_yield) {
 		yield_current();

@@ -184,7 +184,13 @@ endif
 # file. SCENARIO/SCENARIO_FILE are used in the same way. The following block translates the user-visible BOARD/SCENARIO
 # (which is multiplexed) to the internal representation.
 
-ifeq ($(findstring $(MAKECMDGOALS),distclean),)
+CONFIG_FREE_GOALS := clean distclean tags
+CONFIG_REQUIRED_GOALS := $(filter-out $(CONFIG_FREE_GOALS),$(MAKECMDGOALS))
+ifeq ($(MAKECMDGOALS),)
+  CONFIG_REQUIRED_GOALS := all
+endif
+
+ifneq ($(CONFIG_REQUIRED_GOALS),)
 -include $(HV_CONFIG_MK)
 $(eval $(call determine_config,BOARD))
 $(eval $(call determine_config,SCENARIO))

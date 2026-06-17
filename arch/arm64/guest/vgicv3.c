@@ -147,6 +147,7 @@
 #define GITS_CMD_DISCARD		0x0fU
 #define GITS_DEVBITS			15U
 #define GITS_ITT_ENTRY_SIZE		16U
+#define GITS_CMD_QUEUE_BUDGET		1024U
 
 static uint32_t vgic_lr_count;
 static bool vgic_global_initialized;
@@ -171,7 +172,7 @@ static uint32_t min_u32(uint32_t a, uint32_t b)
 
 static bool addr_in_range(uint64_t addr, uint64_t base, uint64_t size)
 {
-	return (addr >= base) && (addr < (base + size));
+	return (size != 0UL) && (addr >= base) && ((addr - base) < size);
 }
 
 static uint16_t arm64_vcpu_count_from_affinity(uint64_t affinity)
@@ -277,32 +278,46 @@ static void vgic_set_pending(struct arm64_vgicv3 *vgic, uint16_t vcpu_id,
 	}
 }
 
+static uint32_t vgic_vtimer_guest_ctl(const struct arm64_vcpu_guest_ctx *gctx);
+
 static void vgic_timer_set_host_mask(struct acrn_vcpu *vcpu, bool masked)
 {
+	struct arm64_vcpu_guest_ctx *gctx;
+	uint32_t ctl;
+
 	if ((vcpu == NULL) || (get_running_vcpu(get_pcpu_id()) != vcpu)) {
 		return;
 	}
 
+	gctx = &vcpu->arch.gctx;
+	ctl = read_cntv_ctl_el0() & (CNTV_CTL_ENABLE | CNTV_CTL_IMASK);
 	if (masked) {
-		arm64_gicv3_disable_irq(ARM64_GIC_PPI_VIRTUAL_TIMER);
-		arm64_gicv3_clear_irq(ARM64_GIC_PPI_VIRTUAL_TIMER);
-		vcpu->arch.gctx.cntv_el2_masked = true;
-	} else if (vcpu->arch.gctx.cntv_el2_masked) {
-		vcpu->arch.gctx.cntv_el2_masked = false;
-		arm64_gicv3_clear_irq(ARM64_GIC_PPI_VIRTUAL_TIMER);
+		gctx->cntv_el2_masked = true;
+		write_cntv_ctl_el0(ctl | CNTV_CTL_IMASK);
+	} else if (gctx->cntv_el2_masked) {
+		gctx->cntv_el2_masked = false;
+		ctl = (ctl & ~CNTV_CTL_IMASK) | (vgic_vtimer_guest_ctl(gctx) & CNTV_CTL_IMASK);
+		write_cntv_ctl_el0(ctl);
 		arm64_gicv3_enable_irq(ARM64_GIC_PPI_VIRTUAL_TIMER);
 	}
 }
 
-static uint32_t vgic_live_vtimer_ctl(void)
+static uint32_t vgic_live_vtimer_ctl(struct acrn_vcpu *vcpu)
 {
-	return read_cntv_ctl_el0() & (CNTV_CTL_ENABLE | CNTV_CTL_IMASK);
+	struct arm64_vcpu_guest_ctx *gctx = &vcpu->arch.gctx;
+	uint32_t ctl = read_cntv_ctl_el0() & (CNTV_CTL_ENABLE | CNTV_CTL_IMASK);
+
+	if (gctx->cntv_el2_masked) {
+		ctl = (ctl & ~CNTV_CTL_IMASK) | (vgic_vtimer_guest_ctl(gctx) & CNTV_CTL_IMASK);
+	}
+
+	return ctl;
 }
 
 static bool vgic_sample_current_vtimer(struct acrn_vcpu *vcpu)
 {
 	struct arm64_vcpu_guest_ctx *gctx = &vcpu->arch.gctx;
-	uint32_t ctl = vgic_live_vtimer_ctl();
+	uint32_t ctl = vgic_live_vtimer_ctl(vcpu);
 	uint64_t cval = read_cntv_cval_el0();
 	uint64_t now = read_cntvct_el0();
 
@@ -341,10 +356,28 @@ static uint64_t vgic_vtimer_host_deadline(const struct arm64_vcpu_guest_ctx *gct
 	return vgic_vtimer_guest_cval(gctx) - gctx->cntvoff_el2;
 }
 
+static bool vgic_vtimer_guest_enabled(const struct arm64_vcpu_guest_ctx *gctx)
+{
+	uint32_t ctl = vgic_vtimer_guest_ctl(gctx);
+
+	return ((ctl & CNTV_CTL_ENABLE) != 0U) && ((ctl & CNTV_CTL_IMASK) == 0U);
+}
+
+static bool vgic_vtimer_guest_expired(const struct arm64_vcpu_guest_ctx *gctx)
+{
+	return vgic_vtimer_guest_enabled(gctx) &&
+		((int64_t)(vgic_vtimer_host_deadline(gctx) - cpu_ticks()) <= 0L);
+}
+
 static uint64_t vgic_its_baser_type(uint32_t type, uint32_t entry_size)
 {
 	return ((uint64_t)type << GITS_BASER_TYPE_SHIFT) |
 		((uint64_t)(entry_size - 1U) << GITS_BASER_ENTRY_SIZE_SHIFT);
+}
+
+static bool vits_offset_aligned(uint64_t offset)
+{
+	return (offset & (GITS_CMD_SIZE - 1UL)) == 0UL;
 }
 
 static void vgic_its_init(struct arm64_vgicv3 *vgic)
@@ -389,17 +422,14 @@ static void vgicv3_arm_vtimer_backup(struct acrn_vcpu *vcpu)
 {
 	struct arm64_vcpu_guest_ctx *gctx;
 	uint64_t deadline;
-	uint32_t ctl;
 
 	if ((vcpu == NULL) || !vcpu->arch.vtimer_backup_initialized) {
 		return;
 	}
 
 	gctx = &vcpu->arch.gctx;
-	ctl = vgic_vtimer_guest_ctl(gctx);
 	deadline = vgic_vtimer_host_deadline(gctx);
-	if (((ctl & CNTV_CTL_ENABLE) == 0U) || ((ctl & CNTV_CTL_IMASK) != 0U) ||
-		((int64_t)(deadline - cpu_ticks()) <= 0L)) {
+	if (!vgic_vtimer_guest_enabled(gctx) || ((int64_t)(deadline - cpu_ticks()) <= 0L)) {
 		vgicv3_disarm_vtimer_backup(vcpu);
 		return;
 	}
@@ -417,23 +447,25 @@ static void vgicv3_vtimer_backup_handler(void *data)
 {
 	struct acrn_vcpu *vcpu = (struct acrn_vcpu *)data;
 	struct arm64_vcpu_guest_ctx *gctx;
-	uint64_t deadline;
 	uint32_t ctl;
 	uint32_t virq;
 
 	if ((vcpu == NULL) || (vcpu->vm == NULL) || (vcpu->state != VCPU_RUNNING)) {
 		return;
 	}
+	if (get_running_vcpu(get_pcpu_id()) == vcpu) {
+		return;
+	}
 
 	gctx = &vcpu->arch.gctx;
 	virq = (gctx->timer_virq == 0U) ? ARM64_GIC_PPI_VIRTUAL_TIMER : gctx->timer_virq;
 	ctl = vgic_vtimer_guest_ctl(gctx);
-	deadline = vgic_vtimer_host_deadline(gctx);
-	if (((ctl & CNTV_CTL_ENABLE) == 0U) || ((ctl & CNTV_CTL_IMASK) != 0U) ||
-		((int64_t)(deadline - cpu_ticks()) > 0L)) {
+	if (!vgic_vtimer_guest_expired(gctx)) {
 		return;
 	}
 
+	arm64_vcpu_trace_vtimer(vcpu, ARM64_VTIMER_TRACE_BACKUP, virq,
+		ctl, vgic_vtimer_guest_cval(gctx), false, false);
 	(void)vgicv3_inject_current_timer(vcpu, virq, ctl, vgic_vtimer_guest_cval(gctx));
 }
 
@@ -730,6 +762,19 @@ static void vgicv3_read_loaded_lrs(struct acrn_vcpu *vcpu, bool is_current)
 	}
 }
 
+static bool vgicv3_lrs_changed(const struct arm64_vgicv3_vcpu_ctx *ctx,
+	const uint64_t old_lrs[ARM64_VGIC_MAX_LRS], uint8_t old_used_lrs, uint64_t old_hcr)
+{
+	bool changed = (ctx->used_lrs != old_used_lrs) || (ctx->hcr != old_hcr);
+	uint32_t idx;
+
+	for (idx = 0U; !changed && (idx < ARM64_VGIC_MAX_LRS); idx++) {
+		changed = (ctx->lr[idx] != old_lrs[idx]);
+	}
+
+	return changed;
+}
+
 static void vgicv3_complete_eoi_lrs(struct acrn_vcpu *vcpu, uint64_t eoi_lrs,
 	const uint64_t *old_lrs, uint8_t old_used_lrs)
 {
@@ -967,6 +1012,11 @@ void arm64_vgicv3_init_vcpu(struct acrn_vcpu *vcpu)
 	}
 }
 
+void arm64_vgicv3_arm_vtimer_backup(struct acrn_vcpu *vcpu)
+{
+	vgicv3_arm_vtimer_backup(vcpu);
+}
+
 void arm64_vgicv3_cancel_vtimer_backup(struct acrn_vcpu *vcpu)
 {
 	vgicv3_disarm_vtimer_backup(vcpu);
@@ -982,6 +1032,7 @@ int32_t arm64_vgicv3_handle_cpuif_sysreg(struct acrn_vcpu *vcpu, uint32_t sysreg
 	uint64_t value = 0UL;
 	uint64_t access_value;
 	bool control_changed = false;
+	bool flush_needed = false;
 	int32_t ret = 0;
 
 	if ((vcpu == NULL) || (vcpu->vm == NULL) || (reg == NULL)) {
@@ -1047,6 +1098,7 @@ int32_t arm64_vgicv3_handle_cpuif_sysreg(struct acrn_vcpu *vcpu, uint32_t sysreg
 			value = 0UL;
 		} else {
 			vgicv3_deactivate_irq_locked(vcpu, (uint32_t)(*reg & ICH_LR_VINTID_MASK));
+			flush_needed = true;
 		}
 		break;
 	case ARM64_VGIC_SYSREG_ICC_RPR_EL1:
@@ -1081,7 +1133,9 @@ int32_t arm64_vgicv3_handle_cpuif_sysreg(struct acrn_vcpu *vcpu, uint32_t sysreg
 		if (control_changed && vgicv3_vcpu_is_loaded(vcpu)) {
 			vgicv3_write_cpuif_control(ctx);
 		}
-		arm64_vgicv3_flush_current_vcpu(vcpu);
+		if (control_changed || flush_needed) {
+			vgicv3_flush_vcpu(vcpu, true);
+		}
 	}
 	spinlock_irqrestore_release(&vgic->lock, flags);
 
@@ -1162,6 +1216,8 @@ static bool vgicv3_complete_timer_lr(struct acrn_vcpu *vcpu,
 		*removed = true;
 	}
 	vgic_timer_set_host_mask(vcpu, line_asserted);
+	arm64_vcpu_trace_vtimer(vcpu, ARM64_VTIMER_TRACE_EOI, desc->virq,
+		UINT32_MAX, UINT64_MAX, false, false);
 
 	return true;
 }
@@ -1187,6 +1243,97 @@ static bool vgicv3_drop_timer_pending_lr(struct acrn_vcpu *vcpu,
 	}
 
 	return false;
+}
+
+static bool vgicv3_requeue_lost_masked_timer(struct acrn_vcpu *vcpu)
+{
+	struct arm64_vgicv3 *vgic = &vcpu->vm->arch_vm.vgic;
+	struct arm64_vgic_irq *desc;
+	uint64_t flags;
+	uint32_t virq;
+	bool requeued = false;
+
+	if (!vcpu->arch.gctx.cntv_el2_masked) {
+		return false;
+	}
+
+	virq = vcpu->arch.gctx.timer_virq;
+	if (virq == 0U) {
+		virq = ARM64_GIC_PPI_VIRTUAL_TIMER;
+		vcpu->arch.gctx.timer_virq = virq;
+	}
+
+	spinlock_irqsave_obtain(&vgic->lock, &flags);
+	vgicv3_sync_vcpu(vcpu, true);
+	desc = vgic_irq_desc(vcpu, virq);
+	if ((desc != NULL) && !desc->pending && !desc->active &&
+		(find_lr_for_virq(vcpu, virq) < 0) && vgic_sample_current_vtimer(vcpu)) {
+		/*
+		 * EL2 may have masked live CNTV while a timer LR was in flight, then later
+		 * observe no LR/descriptor owner after hardware consumed the pending-only
+		 * entry. Requeue from the live CNTV level so the next flush has a normal
+		 * virtual interrupt to present.
+		 */
+		vgic_set_pending(vgic, vcpu->vcpu_id, desc, true);
+		vgicv3_flush_vcpu(vcpu, true);
+		arm64_vcpu_trace_vtimer(vcpu, ARM64_VTIMER_TRACE_REQUEUE, virq,
+			UINT32_MAX, UINT64_MAX, false, false);
+		requeued = true;
+	}
+	spinlock_irqrestore_release(&vgic->lock, flags);
+
+	return requeued;
+}
+
+static void vgicv3_sync_timer_line_locked(struct acrn_vcpu *vcpu, bool is_current,
+	bool line_asserted)
+{
+	struct arm64_vgicv3 *vgic = &vcpu->vm->arch_vm.vgic;
+	struct arm64_vgic_irq *desc;
+	uint32_t virq = vcpu->arch.gctx.timer_virq;
+	int32_t lr_idx;
+
+	if (virq == 0U) {
+		virq = ARM64_GIC_PPI_VIRTUAL_TIMER;
+		vcpu->arch.gctx.timer_virq = virq;
+	}
+
+	desc = vgic_irq_desc(vcpu, virq);
+	if (desc == NULL) {
+		return;
+	}
+
+	/*
+	 * The timer interrupt is a level line whose source is CNTV while loaded
+	 * and the saved CNTV deadline while offline. Lowering the line must remove
+	 * stale pending-only LR state as well as the software pending bit, otherwise
+	 * a consumed timer can be presented again after the guest has programmed a
+	 * future deadline.
+	 */
+	desc->level = true;
+	vgic_set_pending(vgic, vcpu->vcpu_id, desc, line_asserted);
+	lr_idx = find_lr_for_virq(vcpu, virq);
+	if (lr_idx >= 0) {
+		uint32_t state = lr_state(vcpu->arch.vgic.lr[lr_idx]);
+		bool lr_active = ((state & ICH_LR_STATE_ACTIVE) != 0U);
+
+		if (line_asserted || lr_active) {
+			vcpu->arch.vgic.lr[lr_idx] = make_lr_state(desc, line_asserted, lr_active);
+		} else {
+			remove_lr(vcpu, (uint32_t)lr_idx);
+		}
+	}
+	vgic_timer_set_host_mask(vcpu, line_asserted || desc->active);
+	if (!line_asserted) {
+		if (is_current || vgicv3_vcpu_is_loaded(vcpu)) {
+			vgicv3_disarm_vtimer_backup(vcpu);
+		} else {
+			vgicv3_arm_vtimer_backup(vcpu);
+		}
+	} else {
+		vgicv3_disarm_vtimer_backup(vcpu);
+	}
+	vgicv3_flush_vcpu(vcpu, is_current);
 }
 
 static void vgicv3_sync_vcpu(struct acrn_vcpu *vcpu, bool is_current)
@@ -1256,7 +1403,7 @@ static void vgicv3_sync_vcpu(struct acrn_vcpu *vcpu, bool is_current)
 				vgic_set_pending(&vcpu->vm->arch_vm.vgic, vcpu->vcpu_id, desc, false);
 			}
 			desc->active = false;
-			if ((virq == ARM64_GIC_PPI_VIRTUAL_TIMER) && !queued_level) {
+			if ((virq == vcpu->arch.gctx.timer_virq) && !queued_level) {
 				vgic_timer_set_host_mask(vcpu, false);
 			}
 		}
@@ -1486,12 +1633,10 @@ static void vgicv3_flush_vcpu(struct acrn_vcpu *vcpu, bool is_current)
 			lr_idx = find_lr_for_virq(vcpu, virq);
 			if (lr_idx >= 0) {
 				/*
-				 * A level interrupt can assert again while the guest still
-				 * owns the active LR instance. Reflect that as Active+Pending
-				 * in the LR; leaving pending only in software makes the vCPU
-				 * resume with an active-only interrupt that cannot be
-				 * redelivered after the next EOI.
-			 */
+				 * If the IRQ already has an LR slot, refresh it from descriptor
+				 * state and clear the software pending bitmap. Timer redelivery is
+				 * resampled by the dedicated CNTV synchronization paths.
+				 */
 				ctx->lr[lr_idx] = make_lr(desc);
 				vgic_set_pending(vgic, vcpu->vcpu_id, desc, false);
 				continue;
@@ -1568,6 +1713,14 @@ void arm64_vgicv3_flush_current_vcpu(struct acrn_vcpu *vcpu)
 	}
 }
 
+static void vgicv3_flush_target_vcpu(struct acrn_vcpu *current_vcpu,
+	struct acrn_vcpu *target_vcpu)
+{
+	if (target_vcpu != NULL) {
+		vgicv3_flush_vcpu(target_vcpu, target_vcpu == current_vcpu);
+	}
+}
+
 static void vgicv3_flush_vm(struct acrn_vcpu *current_vcpu)
 {
 	struct acrn_vm *vm = current_vcpu->vm;
@@ -1575,11 +1728,7 @@ static void vgicv3_flush_vm(struct acrn_vcpu *current_vcpu)
 	uint16_t idx;
 
 	foreach_vcpu(idx, vm, target_vcpu) {
-		if (target_vcpu == current_vcpu) {
-			arm64_vgicv3_flush_current_vcpu(target_vcpu);
-		} else {
-			arm64_vgicv3_flush_vcpu(target_vcpu);
-		}
+		vgicv3_flush_target_vcpu(current_vcpu, target_vcpu);
 	}
 }
 
@@ -1596,11 +1745,11 @@ static int32_t vgic_inject_locked(struct arm64_vgicv3 *vgic, struct acrn_vcpu *t
 		 * a blocked vCPU and makes the scheduler re-enter pre-guest
 		 * request processing.
 		 */
-		arm64_vgicv3_sync_vcpu(target_vcpu);
+		vgicv3_sync_vcpu(target_vcpu, false);
 		desc->level = level;
 		vgic_set_pending(vgic, target_vcpu->vcpu_id, desc, true);
 		if (vgicv3_vcpu_is_loaded(target_vcpu)) {
-			arm64_vgicv3_flush_vcpu(target_vcpu);
+			vgicv3_flush_vcpu(target_vcpu, false);
 		}
 		ret = 0;
 	}
@@ -1690,7 +1839,7 @@ int32_t arm64_vgicv3_clear_irq(struct acrn_vcpu *vcpu, uint32_t virq)
 
 		vgic = &vcpu->vm->arch_vm.vgic;
 		spinlock_irqsave_obtain(&vgic->lock, &flags);
-		arm64_vgicv3_sync_vcpu(vcpu);
+		vgicv3_sync_vcpu(vcpu, false);
 		lr_idx = find_lr_for_virq(vcpu, virq);
 		if (lr_idx >= 0) {
 			remove_lr(vcpu, (uint32_t)lr_idx);
@@ -1698,7 +1847,7 @@ int32_t arm64_vgicv3_clear_irq(struct acrn_vcpu *vcpu, uint32_t virq)
 		vgic_set_pending(vgic, vcpu->vcpu_id, desc, false);
 		desc->active = false;
 		if (vgicv3_vcpu_is_loaded(vcpu)) {
-			arm64_vgicv3_flush_vcpu(vcpu);
+			vgicv3_flush_vcpu(vcpu, false);
 		}
 		spinlock_irqrestore_release(&vgic->lock, flags);
 		vcpu_make_request(vcpu, ARM64_VCPU_REQUEST_EVENT);
@@ -1718,7 +1867,7 @@ int32_t arm64_vgicv3_deassert_irq(struct acrn_vcpu *vcpu, uint32_t virq)
 	if (desc != NULL) {
 		vgic = &vcpu->vm->arch_vm.vgic;
 		spinlock_irqsave_obtain(&vgic->lock, &flags);
-		arm64_vgicv3_sync_vcpu(vcpu);
+		vgicv3_sync_vcpu(vcpu, false);
 		/*
 		 * Device level deassertion lowers the input line; it is not a guest
 		 * deactivate command. Preserve Active LRs until the guest EOI path
@@ -1727,7 +1876,7 @@ int32_t arm64_vgicv3_deassert_irq(struct acrn_vcpu *vcpu, uint32_t virq)
 		vgic_set_pending(vgic, vcpu->vcpu_id, desc, false);
 		vgic_update_irq_lr(vcpu, desc);
 		if (vgicv3_vcpu_is_loaded(vcpu)) {
-			arm64_vgicv3_flush_vcpu(vcpu);
+			vgicv3_flush_vcpu(vcpu, false);
 		}
 		spinlock_irqrestore_release(&vgic->lock, flags);
 		vcpu_make_request(vcpu, ARM64_VCPU_REQUEST_EVENT);
@@ -1821,8 +1970,8 @@ void arm64_vgicv3_maintenance_irq_handler(__unused uint32_t irq, __unused void *
 		spinlock_irqsave_obtain(&vgic->lock, &flags);
 		vgicv3_record_cpuif_snapshot(vcpu, &vcpu->arch.debug.last_vgic_maintenance,
 			ARM64_VCPU_DEBUG_VGIC_MAINTENANCE);
-		arm64_vgicv3_sync_current_vcpu(vcpu);
-		arm64_vgicv3_flush_current_vcpu(vcpu);
+		vgicv3_sync_vcpu(vcpu, true);
+		vgicv3_flush_vcpu(vcpu, true);
 		spinlock_irqrestore_release(&vgic->lock, flags);
 	}
 }
@@ -1830,7 +1979,6 @@ void arm64_vgicv3_maintenance_irq_handler(__unused uint32_t irq, __unused void *
 void arm64_vgicv3_update_current_vtimer(struct acrn_vcpu *vcpu)
 {
 	struct arm64_vgicv3 *vgic;
-	struct arm64_vgic_irq *desc;
 	uint64_t flags;
 	uint32_t virq;
 	bool level;
@@ -1855,25 +2003,10 @@ void arm64_vgicv3_update_current_vtimer(struct acrn_vcpu *vcpu)
 	 * instead of overwriting it with a stale Pending-only LR.
 	 */
 	vgicv3_sync_vcpu(vcpu, true);
-	desc = vgic_irq_desc(vcpu, virq);
-	if (desc != NULL) {
-		desc->level = true;
-		if (level) {
-			vgicv3_disarm_vtimer_backup(vcpu);
-			vgic_set_pending(vgic, vcpu->vcpu_id, desc, true);
-		} else {
-			/*
-			 * Pending represents the sampled timer line. Clear it even
-			 * while an LR is still active so EOI synchronization does not
-			 * requeue a stale timer after the guest has advanced CNTV_CVAL.
-			 */
-			vgic_set_pending(vgic, vcpu->vcpu_id, desc, false);
-			if (!desc->active) {
-				vgic_timer_set_host_mask(vcpu, false);
-			}
-			vgicv3_arm_vtimer_backup(vcpu);
-		}
-		arm64_vgicv3_flush_current_vcpu(vcpu);
+	vgicv3_sync_timer_line_locked(vcpu, true, level);
+	if (level || vcpu->arch.gctx.cntv_el2_masked) {
+		arm64_vcpu_trace_vtimer(vcpu, ARM64_VTIMER_TRACE_UPDATE, virq,
+			UINT32_MAX, UINT64_MAX, false, false);
 	}
 	spinlock_irqrestore_release(&vgic->lock, flags);
 }
@@ -1893,6 +2026,8 @@ static int32_t vgicv3_inject_current_timer(struct acrn_vcpu *vcpu, uint32_t virq
 	vcpu->arch.debug.last_timer.write = false;
 	vcpu->arch.debug.last_timer.injected = true;
 	vcpu->arch.debug.last_timer.tsc = cpu_ticks();
+	arm64_vcpu_trace_vtimer(vcpu, ARM64_VTIMER_TRACE_INJECT, virq,
+		vcpu->arch.debug.last_timer.ctl, guest_cval, false, true);
 
 	return ret;
 }
@@ -1924,18 +2059,18 @@ void arm64_vgicv3_virtual_timer_irq_handler(__unused uint32_t irq, __unused void
 		}
 		if (virq == ARM64_GIC_PPI_PHYSICAL_TIMER) {
 			vcpu->arch.gctx.cntp_cval_el0 = read_cntv_cval_el0();
-			vcpu->arch.gctx.cntp_ctl_el0 = vgic_live_vtimer_ctl();
+			vcpu->arch.gctx.cntp_ctl_el0 = vgic_live_vtimer_ctl(vcpu);
 		} else {
 			vcpu->arch.gctx.cntv_cval_el0 = read_cntv_cval_el0();
-			vcpu->arch.gctx.cntv_ctl_el0 = vgic_live_vtimer_ctl();
+			vcpu->arch.gctx.cntv_ctl_el0 = vgic_live_vtimer_ctl(vcpu);
 		}
 
 		/*
 		 * The hardware virtual timer is level-triggered. Once the deadline
 		 * expires, the PPI remains asserted until the guest programs a new
-		 * deadline or masks/disables the timer. Disable the host's local PPI
-		 * while the virtual IRQ is in flight, but leave CNTV_CTL as guest
-		 * state so the handler observes the same control bits it programmed.
+		 * deadline or masks/disables the timer. Mask the live CNTV output while
+		 * the virtual IRQ is in flight, but keep the guest shadow state as the
+		 * guest programmed it.
 		 */
 		vgic_timer_set_host_mask(vcpu, true);
 		if (virq == ARM64_GIC_PPI_PHYSICAL_TIMER) {
@@ -1945,6 +2080,8 @@ void arm64_vgicv3_virtual_timer_irq_handler(__unused uint32_t irq, __unused void
 			guest_ctl = vcpu->arch.gctx.cntv_ctl_el0;
 			guest_cval = vcpu->arch.gctx.cntv_cval_el0;
 		}
+		arm64_vcpu_trace_vtimer(vcpu, ARM64_VTIMER_TRACE_PPI, virq,
+			guest_ctl, guest_cval, false, false);
 		(void)vgicv3_inject_current_timer(vcpu, virq, guest_ctl, guest_cval);
 	}
 }
@@ -1965,7 +2102,11 @@ void arm64_vgicv3_poll_current_vtimer(struct acrn_vcpu *vcpu)
 	 * while PPI27 is not asserted. On guest exits, check only the loaded vCPU
 	 * and translate that expired CNTV state into the same guest PPI.
 	 */
-	ctl = vgic_live_vtimer_ctl();
+	if (vcpu->arch.gctx.cntv_el2_masked) {
+		(void)vgicv3_requeue_lost_masked_timer(vcpu);
+		return;
+	}
+	ctl = vgic_live_vtimer_ctl(vcpu);
 	cval = read_cntv_cval_el0();
 
 	if (((ctl & CNTV_CTL_ENABLE) == 0U) || ((ctl & CNTV_CTL_IMASK) != 0U)) {
@@ -1988,6 +2129,8 @@ void arm64_vgicv3_poll_current_vtimer(struct acrn_vcpu *vcpu)
 		vcpu->arch.gctx.cntv_ctl_el0 = ctl & (CNTV_CTL_ENABLE | CNTV_CTL_IMASK);
 	}
 	vgic_timer_set_host_mask(vcpu, true);
+	arm64_vcpu_trace_vtimer(vcpu, ARM64_VTIMER_TRACE_POLL,
+		vcpu->arch.gctx.timer_virq, ctl, cval, false, false);
 	if (vcpu->arch.gctx.timer_virq == ARM64_GIC_PPI_PHYSICAL_TIMER) {
 		(void)vgicv3_inject_current_timer(vcpu, ARM64_GIC_PPI_PHYSICAL_TIMER,
 			vcpu->arch.gctx.cntp_ctl_el0, cval);
@@ -2578,6 +2721,21 @@ static struct arm64_vits_device *vits_alloc_device(struct arm64_vits *its, uint3
 	return NULL;
 }
 
+static uint32_t vits_device_index(const struct arm64_vits *its,
+	const struct arm64_vits_device *device)
+{
+	uint32_t idx = ARM64_VGIC_ITS_DEVICE_NUM;
+
+	if (device != NULL) {
+		idx = (uint32_t)(device - its->device);
+		if (idx >= ARM64_VGIC_ITS_DEVICE_NUM) {
+			idx = ARM64_VGIC_ITS_DEVICE_NUM;
+		}
+	}
+
+	return idx;
+}
+
 static struct arm64_vits_event *vits_find_event(struct arm64_vits *its,
 	uint32_t device_id, uint32_t event_id)
 {
@@ -2609,6 +2767,9 @@ static struct arm64_vits_event *vits_alloc_event(struct arm64_vits *its,
 		if (!its->device[dev_idx].valid || (its->device[dev_idx].device_id != device_id)) {
 			continue;
 		}
+		if (event_id >= its->device[dev_idx].event_count) {
+			break;
+		}
 		for (evt_idx = 0U; evt_idx < ARM64_VGIC_ITS_EVENT_NUM; evt_idx++) {
 			if (!its->event[dev_idx][evt_idx].valid) {
 				its->event[dev_idx][evt_idx].device_id = device_id;
@@ -2625,7 +2786,7 @@ static struct arm64_vits_event *vits_alloc_event(struct arm64_vits *its,
 static uint16_t vits_target_vcpu_id(struct arm64_vgicv3 *vgic, uint16_t collection_id)
 {
 	struct arm64_vits_collection *collection = vits_find_collection(&vgic->its, collection_id);
-	uint16_t target = 0U;
+	uint16_t target = VGIC_INVALID_VCPU_ID;
 
 	if ((collection != NULL) && collection->valid) {
 		target = vgic_valid_target_vcpu(vgic, collection->target_vcpu);
@@ -2646,6 +2807,9 @@ static void vits_inject_event_locked(struct acrn_vm *vm, struct arm64_vgicv3 *vg
 	}
 
 	target_vcpu_id = vits_target_vcpu_id(vgic, event->collection_id);
+	if (target_vcpu_id >= vgic->vcpu_count) {
+		return;
+	}
 	target_vcpu = vcpu_from_vid(vm, target_vcpu_id);
 	desc = vgic_irq_desc(target_vcpu, event->lpi);
 	if (desc != NULL) {
@@ -2692,6 +2856,7 @@ static void vits_execute_cmd(struct acrn_vm *vm, struct arm64_vgicv3 *vgic,
 	struct arm64_vits_device *device;
 	struct arm64_vits_event *event;
 	struct arm64_vits_collection *collection;
+	uint32_t dev_idx;
 
 	switch (opcode) {
 	case GITS_CMD_MAPD:
@@ -2705,13 +2870,22 @@ static void vits_execute_cmd(struct acrn_vm *vm, struct arm64_vgicv3 *vgic,
 		}
 		if (device != NULL) {
 			uint32_t size = (uint32_t)(cmd[1] & 0x1fUL) + 1U;
-
-			device->itt_addr = cmd[2] & GITS_CMD_ITT_ADDRESS_MASK;
-			device->event_count = (size < 16U) ? (uint16_t)(1U << size) :
+			uint64_t itt_addr = cmd[2] & GITS_CMD_ITT_ADDRESS_MASK;
+			uint16_t event_count = (size < 16U) ? (uint16_t)(1U << size) :
 				ARM64_VGIC_ITS_EVENT_NUM;
-			if (device->event_count > ARM64_VGIC_ITS_EVENT_NUM) {
-				device->event_count = ARM64_VGIC_ITS_EVENT_NUM;
+
+			if (event_count > ARM64_VGIC_ITS_EVENT_NUM) {
+				event_count = ARM64_VGIC_ITS_EVENT_NUM;
 			}
+			if ((device->itt_addr != itt_addr) || (device->event_count != event_count)) {
+				dev_idx = vits_device_index(its, device);
+				if (dev_idx < ARM64_VGIC_ITS_DEVICE_NUM) {
+					(void)memset(its->event[dev_idx], 0U, sizeof(its->event[dev_idx]));
+				}
+			}
+
+			device->itt_addr = itt_addr;
+			device->event_count = event_count;
 		}
 		break;
 	case GITS_CMD_MAPC:
@@ -2726,7 +2900,11 @@ static void vits_execute_cmd(struct acrn_vm *vm, struct arm64_vgicv3 *vgic,
 		lpi = ARM64_VGIC_LPI_BASE + event_id;
 		/* fall through */
 	case GITS_CMD_MAPTI:
-		if (!vgic_irq_is_lpi(lpi) || (vits_find_device(its, device_id) == NULL)) {
+		device = vits_find_device(its, device_id);
+		collection = vits_find_collection(its, collection_id);
+		if (!vgic_irq_is_lpi(lpi) || (device == NULL) ||
+			(event_id >= device->event_count) ||
+			(collection == NULL) || !collection->valid) {
 			break;
 		}
 		event = vits_find_event(its, device_id, event_id);
@@ -2749,7 +2927,8 @@ static void vits_execute_cmd(struct acrn_vm *vm, struct arm64_vgicv3 *vgic,
 		break;
 	case GITS_CMD_MOVI:
 		event = vits_find_event(its, device_id, event_id);
-		if (event != NULL) {
+		collection = vits_find_collection(its, collection_id);
+		if ((event != NULL) && (collection != NULL) && collection->valid) {
 			event->collection_id = collection_id;
 		}
 		break;
@@ -2766,11 +2945,15 @@ static void vits_execute_cmd(struct acrn_vm *vm, struct arm64_vgicv3 *vgic,
 		event = vits_find_event(its, device_id, event_id);
 		if ((event != NULL) && vgic_irq_is_lpi(event->lpi)) {
 			uint16_t target = vits_target_vcpu_id(vgic, event->collection_id);
-			struct arm64_vgic_irq *desc = &vgic->lpi[target][vgic_lpi_index(event->lpi)];
 
-			vgic_set_pending(vgic, target, desc, false);
-			desc->active = false;
-			vgic_update_irq_row_lr(vm, target, desc);
+			if (target < vgic->vcpu_count) {
+				struct arm64_vgic_irq *desc =
+					&vgic->lpi[target][vgic_lpi_index(event->lpi)];
+
+				vgic_set_pending(vgic, target, desc, false);
+				desc->active = false;
+				vgic_update_irq_row_lr(vm, target, desc);
+			}
 		}
 		break;
 	case GITS_CMD_INV:
@@ -2793,37 +2976,51 @@ static uint64_t vits_cmd_queue_size(const struct arm64_vits *its)
 	return (((its->cbaser & GITS_CBASER_SIZE_MASK) + 1UL) * PAGE_SIZE);
 }
 
-static void vits_process_command_queue(struct acrn_vm *vm, struct arm64_vgicv3 *vgic)
+static bool vits_process_command_queue(struct acrn_vm *vm, struct arm64_vgicv3 *vgic)
 {
 	struct arm64_vits *its = &vgic->its;
 	uint64_t base = vits_cmd_queue_base(its);
 	uint64_t size = vits_cmd_queue_size(its);
 	uint64_t reader = its->creadr;
 	uint64_t writer = its->cwriter;
+	uint32_t processed = 0U;
+	bool flush = false;
 
 	if (((its->ctlr & GITS_CTLR_ENABLE) == 0U) ||
 		((its->cbaser & GITS_CBASER_VALID) == 0UL) ||
 		(size < GITS_CMD_SIZE)) {
 		its->creadr = writer;
-		return;
+		return false;
 	}
 
-	reader %= size;
-	writer %= size;
-	while (reader != writer) {
+	/*
+	 * The ITS command queue is guest owned, but EL2 processes it while holding
+	 * the vGIC lock. Enforce command-size alignment and a per-entry budget so
+	 * malformed queues cannot keep unrelated vGIC operations blocked forever.
+	 */
+	if ((reader >= size) || (writer >= size) ||
+		!vits_offset_aligned(reader) || !vits_offset_aligned(writer)) {
+		its->creadr = writer;
+		return false;
+	}
+
+	while ((reader != writer) && (processed < GITS_CMD_QUEUE_BUDGET)) {
 		uint64_t cmd[4];
 
 		if (copy_from_gpa(vm, cmd, base + reader, sizeof(cmd)) != 0) {
 			break;
 		}
 		vits_execute_cmd(vm, vgic, cmd);
+		flush = true;
 		reader += GITS_CMD_SIZE;
+		processed++;
 		if (reader >= size) {
 			reader = 0UL;
 		}
 	}
 
 	its->creadr = reader;
+	return flush;
 }
 
 static void vits_write_translater(struct acrn_vm *vm, struct arm64_vgicv3 *vgic,
@@ -3266,7 +3463,7 @@ static int32_t vgicr_mmio_access(struct acrn_vcpu *vcpu, struct arm64_vgicv3 *vg
 				if (target_vcpu != NULL) {
 					vgic_write_irq_priority(target_vcpu, irq_base, mmio->size,
 						mmio->value);
-					arm64_vgicv3_flush_vcpu(target_vcpu);
+					vgicv3_flush_target_vcpu(vcpu, target_vcpu);
 				}
 				break;
 			default:
@@ -3282,7 +3479,7 @@ static int32_t vgicr_mmio_access(struct acrn_vcpu *vcpu, struct arm64_vgicv3 *vg
 				break;
 			case ACRN_IOREQ_DIR_WRITE:
 				if (vgicr_mmio_write(vgic, target_vcpu, mmio, &frame)) {
-					arm64_vgicv3_flush_vcpu(target_vcpu);
+					vgicv3_flush_target_vcpu(vcpu, target_vcpu);
 				}
 				break;
 			default:
@@ -3300,11 +3497,12 @@ static uint32_t vits_baser_index(uint32_t offset)
 	return (offset - GITS_BASER) / 8U;
 }
 
-static void vits_mmio_read(struct acrn_vcpu *vcpu, struct arm64_vgicv3 *vgic,
+static bool vits_mmio_read(struct acrn_vcpu *vcpu, struct arm64_vgicv3 *vgic,
 	struct acrn_mmio_request *mmio, uint32_t offset)
 {
 	struct arm64_vits *its = &vgic->its;
 	uint64_t value64 = 0UL;
+	bool flush = false;
 
 	if ((offset >= GITS_BASER) &&
 		(offset < (GITS_BASER + (ARM64_VGIC_ITS_BASER_NUM * 8U)))) {
@@ -3313,7 +3511,7 @@ static void vits_mmio_read(struct acrn_vcpu *vcpu, struct arm64_vgicv3 *vgic,
 		value64 = its->baser[idx];
 		mmio->value = ((offset & 0x4U) == 0U) ?
 			(value64 & UINT32_MAX) : (value64 >> 32U);
-		return;
+		return false;
 	}
 
 	switch (offset) {
@@ -3345,9 +3543,11 @@ static void vits_mmio_read(struct acrn_vcpu *vcpu, struct arm64_vgicv3 *vgic,
 		mmio->value = its->cwriter >> 32U;
 		break;
 	case GITS_CREADR:
+		flush = vits_process_command_queue(vcpu->vm, vgic);
 		mmio->value = its->creadr & UINT32_MAX;
 		break;
 	case GITS_CREADR + 4U:
+		flush = vits_process_command_queue(vcpu->vm, vgic);
 		mmio->value = its->creadr >> 32U;
 		break;
 	case GITS_PIDR2:
@@ -3369,6 +3569,8 @@ static void vits_mmio_read(struct acrn_vcpu *vcpu, struct arm64_vgicv3 *vgic,
 		mmio->value = 0UL;
 		break;
 	}
+
+	return flush;
 }
 
 static bool vits_mmio_write(struct acrn_vcpu *vcpu, struct arm64_vgicv3 *vgic,
@@ -3395,8 +3597,7 @@ static bool vits_mmio_write(struct acrn_vcpu *vcpu, struct arm64_vgicv3 *vgic,
 		its->ctlr = ((uint32_t)value & GITS_CTLR_ENABLE) |
 			(((value & GITS_CTLR_ENABLE) == 0U) ? GITS_CTLR_QUIESCENT : 0U);
 		if ((its->ctlr & GITS_CTLR_ENABLE) != 0U) {
-			vits_process_command_queue(vcpu->vm, vgic);
-			flush = true;
+			flush = vits_process_command_queue(vcpu->vm, vgic);
 		}
 		break;
 	case GITS_CBASER:
@@ -3411,13 +3612,11 @@ static bool vits_mmio_write(struct acrn_vcpu *vcpu, struct arm64_vgicv3 *vgic,
 		break;
 	case GITS_CWRITER:
 		its->cwriter = (its->cwriter & 0xffffffff00000000UL) | value;
-		vits_process_command_queue(vcpu->vm, vgic);
-		flush = true;
+		flush = vits_process_command_queue(vcpu->vm, vgic);
 		break;
 	case GITS_CWRITER + 4U:
 		its->cwriter = (its->cwriter & UINT32_MAX) | (value << 32U);
-		vits_process_command_queue(vcpu->vm, vgic);
-		flush = true;
+		flush = vits_process_command_queue(vcpu->vm, vgic);
 		break;
 	case GITS_TRANSLATER:
 		vits_write_translater(vcpu->vm, vgic, (uint32_t)value);
@@ -3441,7 +3640,9 @@ static int32_t vits_mmio_access(struct acrn_vcpu *vcpu, struct arm64_vgicv3 *vgi
 	} else {
 		switch (mmio->direction) {
 		case ACRN_IOREQ_DIR_READ:
-			vits_mmio_read(vcpu, vgic, mmio, offset);
+			if (vits_mmio_read(vcpu, vgic, mmio, offset)) {
+				vgicv3_flush_vm(vcpu);
+			}
 			break;
 		case ACRN_IOREQ_DIR_WRITE:
 			if (vits_mmio_write(vcpu, vgic, mmio, offset)) {
@@ -3455,6 +3656,36 @@ static int32_t vits_mmio_access(struct acrn_vcpu *vcpu, struct arm64_vgicv3 *vgi
 	}
 
 	return ret;
+}
+
+static bool vits_mmio_access64(struct acrn_vcpu *vcpu, struct arm64_vgicv3 *vgic,
+	struct acrn_mmio_request *mmio, int32_t *status)
+{
+	struct arm64_vits *its = &vgic->its;
+	uint32_t offset = (uint32_t)(mmio->address - arm64_platform_guest_its_base(vcpu->vm->vm_id));
+	bool handled = false;
+
+	if (status != NULL) {
+		*status = -ENODEV;
+	}
+	if ((offset == GITS_CWRITER) && (mmio->size == 8UL) &&
+		(mmio->direction == ACRN_IOREQ_DIR_WRITE)) {
+		handled = true;
+		/*
+		 * CWRITER is a 64-bit producer pointer. Update the full value before
+		 * consuming commands so a split low/high emulation does not run the
+		 * queue against a half-written writer offset.
+		 */
+		its->cwriter = mmio->value;
+		if (vits_process_command_queue(vcpu->vm, vgic)) {
+			vgicv3_flush_vm(vcpu);
+		}
+		if (status != NULL) {
+			*status = 0;
+		}
+	}
+
+	return handled;
 }
 
 static int32_t vgicv3_mmio_dispatch(struct acrn_vcpu *vcpu, struct arm64_vgicv3 *vgic,
@@ -3483,6 +3714,13 @@ static int32_t vgicv3_mmio_dispatch64(struct acrn_vcpu *vcpu, struct arm64_vgicv
 	struct acrn_mmio_request low = *mmio;
 	struct acrn_mmio_request high = *mmio;
 	int32_t ret;
+
+	if (vgic->its_enabled &&
+		addr_in_range(mmio->address, arm64_platform_guest_its_base(vcpu->vm->vm_id),
+		arm64_platform_guest_its_size(vcpu->vm->vm_id)) &&
+		vits_mmio_access64(vcpu, vgic, mmio, &ret)) {
+		return ret;
+	}
 
 	/*
 	 * Some guest code issues 64-bit accesses to GIC registers even when the
@@ -3544,10 +3782,20 @@ int32_t arm64_vgicv3_mmio_handler(struct io_request *io_req, void *handler_priva
 	 * single coherent state transition.
 	 */
 	if ((vcpu != NULL) && (vgic != NULL)) {
+		struct arm64_vgicv3_vcpu_ctx *ctx = &vcpu->arch.vgic;
+		uint64_t old_lrs[ARM64_VGIC_MAX_LRS];
+		uint64_t old_hcr;
+		uint8_t old_used_lrs;
+
 		spinlock_irqsave_obtain(&vgic->lock, &flags);
-		arm64_vgicv3_sync_current_vcpu(vcpu);
+		old_used_lrs = ctx->used_lrs;
+		old_hcr = ctx->hcr;
+		(void)memcpy(old_lrs, ctx->lr, sizeof(old_lrs));
+		vgicv3_sync_vcpu(vcpu, true);
 		ret = vgicv3_mmio_access(vcpu, vgic, mmio);
-		arm64_vgicv3_flush_current_vcpu(vcpu);
+		if (vgicv3_lrs_changed(ctx, old_lrs, old_used_lrs, old_hcr)) {
+			vgicv3_flush_vcpu(vcpu, true);
+		}
 		spinlock_irqrestore_release(&vgic->lock, flags);
 	}
 

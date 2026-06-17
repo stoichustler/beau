@@ -178,16 +178,16 @@ static const char *gic_irq_name(uint32_t intid)
 
 	switch (intid) {
 	case ARM64_GIC_SGI_SMP_CALL:
-		name = "gic:sgi-smp-call";
+		name = "gic:sgi-smp";
 		break;
 	case ARM64_GIC_PPI_VGIC_MAINTENANCE:
-		name = "gic:vgic-maint";
+		name = "gic:vgic-mirq";
 		break;
 	case ARM64_GIC_PPI_VIRTUAL_TIMER:
-		name = "gic:virt-timer";
+		name = "gic:vtimer";
 		break;
 	case ARM64_GIC_PPI_PHYSICAL_TIMER:
-		name = "gic:phys-timer";
+		name = "gic:ptimer";
 		break;
 	default:
 		if (intid < 16U) {
@@ -213,7 +213,7 @@ const char *arch_irq_name(uint32_t irq)
 	const char *name = "-";
 
 	/*
-	 * irqs prints generic ACRN IRQ numbers, while ARM hardware reports GIC
+	 * irqstat prints generic ACRN IRQ numbers, while ARM hardware reports GIC
 	 * INTIDs. Decode the domain range here so the shell can explain whether a
 	 * count belongs to an SGI, PPI, SPI, or one of the EL2-owned timer/vGIC
 	 * sources without teaching common shell code about ARM64 numbering.

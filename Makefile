@@ -417,6 +417,10 @@ $(HV_OBJDIR)/$(HV_DEBUG_FILE).out: $(MODULES) $(HV_OBJDIR)/symtab.o
 	$(Q)$(CC) -Wl,-Map=$(HV_OBJDIR)/$(HV_DEBUG_FILE).map -o $@ $(LDFLAGS) $(ARCH_LDFLAGS) -T$(ARCH_LDSCRIPT) \
 		-Wl,--start-group $(HV_OBJDIR)/symtab.o $(MODULES) -Wl,--end-group
 
+.PHONY: tags
+tags:
+	$(Q)ctags --languages=Asm,c,c++ -R
+
 .PHONY: clean
 clean:
 	rm -rf $(VERSION)

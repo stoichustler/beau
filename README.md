@@ -34,7 +34,7 @@ for mixed RTOS and Linux guests.
 | GICv3 | vGICv3 distributor, per-vCPU redistributor, list registers |
 | Interrupts | SGI/PPI/SPI routing, timer injection, vGIC maintenance handling |
 | Console | vPL011, async VM console buffer, `vsh` guest shell switching |
-| Debug | `vcpus`, `threads`, `schedstat`, `vmap`, `irqs`, `dumpstat`, `vsh` |
+| Debug | `vcpus`, `threads`, `schedstat`, `vmap`, `irqstat`, `dumpstat`, `vsh` |
 | Tests | `scripts/regress.py` validates SIMA shell and all guest consoles |
 | Docs | SDK notes, ARM64 assembly comments, concise architecture references |
 

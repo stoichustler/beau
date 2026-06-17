@@ -285,6 +285,25 @@ static const char *shell_exit_source_to_str(uint32_t source)
 	return str;
 }
 
+static const char *shell_abort_type_to_str(uint32_t abort_type)
+{
+	const char *str;
+
+	switch (abort_type) {
+	case ARM64_VCPU_DEBUG_ABORT_INSTRUCTION:
+		str = "instruction";
+		break;
+	case ARM64_VCPU_DEBUG_ABORT_DATA:
+		str = "data";
+		break;
+	default:
+		str = "none";
+		break;
+	}
+
+	return str;
+}
+
 static const char *shell_vgic_source_to_str(uint32_t source)
 {
 	const char *str;
@@ -326,6 +345,49 @@ static const char *shell_cpuif_sysreg_to_str(uint32_t sysreg)
 		break;
 	case DUMPSTAT_CPUIF_ICC_RPR_EL1:
 		str = "ICC_RPR_EL1";
+		break;
+	default:
+		str = "unknown";
+		break;
+	}
+
+	return str;
+}
+
+static const char *shell_vtimer_trace_event_to_str(uint32_t event)
+{
+	const char *str;
+
+	switch (event) {
+	case ARM64_VTIMER_TRACE_LOAD:
+		str = "load";
+		break;
+	case ARM64_VTIMER_TRACE_UNLOAD:
+		str = "unload";
+		break;
+	case ARM64_VTIMER_TRACE_SYSREG:
+		str = "sysreg";
+		break;
+	case ARM64_VTIMER_TRACE_PPI:
+		str = "ppi";
+		break;
+	case ARM64_VTIMER_TRACE_POLL:
+		str = "poll";
+		break;
+	case ARM64_VTIMER_TRACE_UPDATE:
+		str = "update";
+		break;
+	case ARM64_VTIMER_TRACE_INJECT:
+		str = "inject";
+		break;
+	case ARM64_VTIMER_TRACE_EOI:
+		str = "eoi";
+		break;
+	case ARM64_VTIMER_TRACE_REQUEUE:
+		str = "requeue";
+		break;
+	case ARM64_VTIMER_TRACE_BACKUP:
+		str = "backup";
 		break;
 	default:
 		str = "unknown";
@@ -382,6 +444,11 @@ static void shell_dumpstat_recent_events(const struct arm64_vcpu_debug_info *deb
 		}
 		shell_item_line("  esr:0x%016lx elr:0x%016lx far:0x%016lx hpfar:0x%016lx",
 			last_exit->esr, last_exit->elr, last_exit->far, last_exit->hpfar);
+		if (last_exit->abort_type != ARM64_VCPU_DEBUG_ABORT_NONE) {
+			shell_item_line("  abort:%s fsc:0x%02x",
+				shell_abort_type_to_str(last_exit->abort_type),
+				last_exit->abort_fsc);
+		}
 	}
 
 	if (last_irq->tsc == 0UL) {
@@ -491,6 +558,40 @@ static void shell_dumpstat_recent_events(const struct arm64_vcpu_debug_info *deb
 
 	shell_dumpstat_vgic_event("vgic-sync", &debug->last_vgic_sync);
 	shell_dumpstat_vgic_event("vgic-maint", &debug->last_vgic_maintenance);
+}
+
+static void shell_dumpstat_vtimer_trace(const struct arm64_vcpu_vtimer_trace *trace)
+{
+	uint32_t count = trace->count;
+	uint32_t start;
+	uint32_t idx;
+
+	if (count > ARM64_VCPU_VTIMER_TRACE_NUM) {
+		count = ARM64_VCPU_VTIMER_TRACE_NUM;
+	}
+	if (count == 0U) {
+		shell_item_line("trace:none");
+		return;
+	}
+
+	start = (trace->head + ARM64_VCPU_VTIMER_TRACE_NUM - count) %
+		ARM64_VCPU_VTIMER_TRACE_NUM;
+	for (idx = 0U; idx < count; idx++) {
+		uint32_t ring_idx = (start + idx) % ARM64_VCPU_VTIMER_TRACE_NUM;
+		const struct arm64_vcpu_vtimer_trace_entry *entry = &trace->entry[ring_idx];
+		int64_t delta = (int64_t)(entry->cval - entry->cntvct);
+
+		shell_item_line("vt[%02u] %-7s pcpu:%hu virq:%u ctl:0x%08x exp:%3s mask:%3s p/a/l:%3s/%3s/%3s wr:%3s inj:%3s delta:%ld",
+			idx, shell_vtimer_trace_event_to_str(entry->event),
+			entry->pcpu_id, entry->virq, entry->ctl,
+			shell_yes_no(entry->expired), shell_yes_no(entry->masked),
+			shell_yes_no(entry->pending), shell_yes_no(entry->active),
+			shell_yes_no(entry->level), shell_yes_no(entry->write),
+			shell_yes_no(entry->injected), delta);
+		shell_item_line("       cval:0x%016lx cntvct:0x%016lx lr0:0x%016lx hcr:0x%016lx misr:0x%016lx tsc:0x%lx",
+			entry->cval, entry->cntvct, entry->lr0, entry->hcr,
+			entry->misr, entry->tsc);
+	}
 }
 
 static bool shell_stack_contains(uint64_t start, uint64_t end, uint64_t addr, uint64_t bytes)
@@ -855,6 +956,8 @@ static int32_t shell_dumpstat_vcpu(struct acrn_vcpu *vcpu)
 	shell_dumpstat_recent_events(debug);
 	shell_item_section("timer/vgic state");
 	shell_dumpstat_timer_state(&snapshot);
+	shell_item_section("vtimer trace");
+	shell_dumpstat_vtimer_trace(&debug->vtimer_trace);
 	shell_item_section("local irq state");
 	shell_dumpstat_local_irqs(&snapshot);
 	if (vcpu->state != VCPU_OFFLINE) {

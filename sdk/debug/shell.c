@@ -40,7 +40,7 @@ static int32_t shell_dump_host_mem(int32_t argc, char **argv);
 static int32_t shell_list_vcpu(__unused int32_t argc, __unused char **argv);
 static int32_t shell_list_threads(__unused int32_t argc, __unused char **argv);
 static int32_t shell_schedstat(__unused int32_t argc, __unused char **argv);
-static int32_t shell_irqstats(int32_t argc, char **argv);
+static int32_t shell_irqstat(int32_t argc, char **argv);
 static int32_t shell_to_vm_console(int32_t argc, char **argv);
 static const char *thread_state_str(enum thread_object_state state);
 
@@ -91,7 +91,7 @@ static struct shell_cmd shell_cmds[] = {
 		.str		= SHELL_CMD_IRQ_STATS,
 		.cmd_param	= SHELL_CMD_IRQ_STATS_PARAM,
 		.help_str	= SHELL_CMD_IRQ_STATS_HELP,
-		.fcn		= shell_irqstats,
+		.fcn		= shell_irqstat,
 	},
 	{
 		.str		= SHELL_CMD_VM_CONSOLE,
@@ -1020,30 +1020,41 @@ static int32_t shell_schedstat(__unused int32_t argc, __unused char **argv)
 	return 0;
 }
 
-static bool irq_should_show(uint32_t irq, uint16_t pcpu_num, uint64_t *total)
+struct irqstat_total {
+	uint64_t count;
+	bool overflow;
+};
+
+static void irqstat_add_count(struct irqstat_total *total, uint64_t count)
+{
+	if ((count == UINT64_MAX) || (total->count > (UINT64_MAX - count))) {
+		total->count = UINT64_MAX;
+		total->overflow = true;
+	} else {
+		total->count += count;
+	}
+}
+
+static bool irqstat_should_show(uint32_t irq, uint16_t pcpu_num, struct irqstat_total *total)
 {
 	uint16_t pcpu_id;
-	uint64_t irq_total = 0UL;
 	bool has_handler;
+	struct irqstat_total local_total = {
+		.count = 0UL,
+		.overflow = false,
+	};
 
 	has_handler = irq_desc_array[irq].action != NULL;
-	if ((has_handler == false) &&
-		(bitmap_test((uint16_t)(irq & 0x3FU), irq_alloc_bitmap + (irq >> 6U)) == false)) {
-		if (total != NULL) {
-			*total = 0UL;
-		}
-		return false;
-	}
 
 	for (pcpu_id = 0U; pcpu_id < pcpu_num; pcpu_id++) {
-		irq_total += per_cpu(irq_count, pcpu_id)[irq];
+		irqstat_add_count(&local_total, per_cpu(irq_count, pcpu_id)[irq]);
 	}
 
 	if (total != NULL) {
-		*total = irq_total;
+		*total = local_total;
 	}
 
-	return (irq_total != 0UL) || has_handler;
+	return (local_total.count != 0UL) || has_handler;
 }
 
 #define IRQ_STATS_COMPACT_WIDTH		96U
@@ -1080,11 +1091,12 @@ static void shell_print_irq_cpu_counts(uint32_t irq, uint16_t pcpu_num, uint32_t
 
 	for (pcpu_id = 0U; pcpu_id < pcpu_num; pcpu_id++) {
 		count = per_cpu(irq_count, pcpu_id)[irq];
-		if (count == 0UL) {
-			continue;
-		}
 
-		snprintf(token, sizeof(token), "cpu%hu:%lu", pcpu_id, count);
+		if (count == UINT64_MAX) {
+			snprintf(token, sizeof(token), "cpu%hu:sat", pcpu_id);
+		} else {
+			snprintf(token, sizeof(token), "cpu%hu:%lu", pcpu_id, count);
+		}
 		token_len = IRQ_STATS_CPU_TOKEN_WIDTH;
 		if ((line_len + token_len + (printed ? 1U : 0U)) > IRQ_STATS_COMPACT_WIDTH) {
 			shell_puts("\r\n");
@@ -1117,7 +1129,7 @@ static void shell_print_irq_cpu_counts(uint32_t irq, uint16_t pcpu_num, uint32_t
 	shell_puts("\r\n");
 }
 
-static int32_t shell_irqstats(int32_t argc, __unused char **argv)
+static int32_t shell_irqstat(int32_t argc, __unused char **argv)
 {
 	char temp_str[MAX_STR_SIZE];
 	uint16_t pcpu_num = get_pcpu_nums();
@@ -1125,41 +1137,49 @@ static int32_t shell_irqstats(int32_t argc, __unused char **argv)
 	uint32_t shown = 0U;
 
 	if (argc != 1) {
-		shell_puts("usage: irqs\r\n");
+		shell_puts("usage: irqstat\r\n");
 		return -EINVAL;
 	}
 
 	snprintf(temp_str, MAX_STR_SIZE,
-		"\r\nirq statistics: nr_irqs=%u, pcpus=%hu\r\n",
+		"\r\nirqstat: nr_irqs=%u, pcpus=%hu\r\n",
 		NR_IRQS, pcpu_num);
 	shell_puts(temp_str);
-	shell_puts("irq   name             active flags  action         total   cpu counts\r\n");
-	shell_puts("───── ──────────────── ────── ────── ────────────── ─────── ───────────────────────────────\r\n");
+	shell_puts("irq   name             active flags  action         total   overflow  cpu counts\r\n");
+	shell_puts("───── ──────────────── ────── ────── ────────────── ─────── ────────  ─────────────────────\r\n");
 
 	for (irq = 0U; irq < NR_IRQS; irq++) {
 		struct irq_desc *desc = &irq_desc_array[irq];
-		uint64_t total;
+		struct irqstat_total total;
+		char total_text[24U];
 		bool allocated;
 
-		if (!irq_should_show(irq, pcpu_num, &total)) {
+		if (!irqstat_should_show(irq, pcpu_num, &total)) {
 			continue;
 		}
 
+		if (total.overflow) {
+			snprintf(total_text, sizeof(total_text), "sat");
+		} else {
+			snprintf(total_text, sizeof(total_text), "%lu", total.count);
+		}
+
 		allocated = bitmap_test((uint16_t)(irq & 0x3FU), irq_alloc_bitmap + (irq >> 6U));
-		snprintf(temp_str, MAX_STR_SIZE, "%-5u %-16s %-6s 0x%04x 0x%012lx %-7lu ",
+		snprintf(temp_str, MAX_STR_SIZE, "%-5u %-16s %-6s 0x%04x 0x%012lx %-7s %-8s  ",
 			irq,
 			arch_irq_name(irq),
 			allocated ? "yes" : "no",
 			desc->flags,
 			(uint64_t)desc->action,
-			total);
+			total_text,
+			total.overflow ? "yes" : "no");
 		shell_puts(temp_str);
 		shell_print_irq_cpu_counts(irq, pcpu_num, (uint32_t)strnlen_s(temp_str, MAX_STR_SIZE));
 		shown++;
 	}
 
 	if (shown == 0U) {
-		shell_puts("(no allocated irqs and no interrupt counts)\r\n");
+		shell_puts("(no active irq handlers and no interrupt counts)\r\n");
 	}
 
 	return 0;

@@ -12,7 +12,7 @@
 - `arch/arm64/guest`: stage-2 VM setup, vCPU entry/exit, vGICv3, vPL011, hypercall handling.
 - `core`: common VM, vCPU, scheduler, timer, hypercall, and MMIO request logic.
 - `sdk/boot`: boot module discovery and kernel loaders.
-- `sdk/debug`: SIMA shell, console, debug commands, vsh, dumpstat, irqs.
+- `sdk/debug`: SIMA shell, console, debug commands, vsh, dumpstat, irqstat.
 - `sdk/sdk.md`: current implementation status and verified behavior.
 
 ## Build And Run
@@ -158,7 +158,7 @@ Useful SIMA shell commands:
   entries remain raw addresses because guest symbols are not embedded. Host
   return addresses resolve through the symbol table embedded in
   `sima.debug.out`; offline vCPUs skip stack output.
-- `irqs`: interrupt names, active state, and per-pCPU counts.
+- `irqstat`: interrupt names, active state, overflow state, and all-pCPU counts.
 - `vsh 0`: switch to Zephyr console, expect `zero ~>`.
 - `vsh 1`: switch to LK console, expect `beau ~>`.
 - Ctrl-D: return from VM console to `console:\>`.

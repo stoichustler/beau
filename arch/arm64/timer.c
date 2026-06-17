@@ -13,11 +13,21 @@
 #include <asm/sysreg.h>
 #include <asm/irq.h>
 
-#define ARM64_TIMER_STOP	UINT32_MAX
+#define ARM64_TIMER_MAX_DELTA	UINT32_MAX
+
+static void arm64_stop_physical_timer(void)
+{
+	/*
+	 * Disable the local CNTP comparator instead of programming a sentinel
+	 * deadline. CNTP_TVAL_EL0 is 32-bit, and an absolute sentinel can become
+	 * expired once the physical counter advances beyond it.
+	 */
+	write_cntp_ctl_el0(0U);
+}
 
 static void timer_irq_handler(__unused uint32_t irq, __unused void *data)
 {
-	arch_set_timer_count(ARM64_TIMER_STOP);
+	arm64_stop_physical_timer();
 	fire_softirq(SOFTIRQ_TIMER);
 }
 
@@ -40,7 +50,7 @@ void arch_init_timer(void)
 	}
 	if (acrn_irq != IRQ_INVALID) {
 		arm64_gicv3_enable_irq(ARM64_GIC_PPI_PHYSICAL_TIMER);
-		arch_set_timer_count(ARM64_TIMER_STOP);
+		arm64_stop_physical_timer();
 	}
 }
 
@@ -59,11 +69,11 @@ void arch_set_timer_count(uint64_t timeout)
 	uint64_t now = arch_cpu_ticks();
 	uint64_t delta = (timeout > now) ? (timeout - now) : 1UL;
 
-	if (delta > UINT32_MAX) {
-		delta = UINT32_MAX;
+	if (delta > ARM64_TIMER_MAX_DELTA) {
+		delta = ARM64_TIMER_MAX_DELTA;
 	}
 
-	write_cntp_ctl_el0(0U);
+	arm64_stop_physical_timer();
 	write_cntp_tval_el0((uint32_t)delta);
 	write_cntp_ctl_el0(CNTV_CTL_ENABLE);
 }

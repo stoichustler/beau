@@ -105,11 +105,18 @@ static uint32_t guest_timer_ctl_value(uint32_t ctl, uint64_t cval, uint64_t now)
 static uint64_t arm64_fault_ipa(const struct cpu_regs *regs)
 {
 	/*
-	 * For a stage-2 data abort, HPFAR_EL2 contains the faulting IPA page
-	 * number and FAR_EL2 provides the byte offset inside that page.
+	 * For guest stage-2 memory aborts, HPFAR_EL2 contains the faulting IPA
+	 * page number and FAR_EL2 provides the byte offset inside that page. This
+	 * helper is shared by instruction abort diagnostics and data-abort MMIO
+	 * emulation; only data aborts can be turned into load/store MMIO requests.
 	 */
 	return ((regs->hpfar & HPFAR_EL2_FIPA_MASK) << 8U) |
 		(regs->far & FAR_EL2_PAGE_MASK);
+}
+
+static uint32_t arm64_abort_fsc(uint64_t esr)
+{
+	return (uint32_t)(esr & ESR_ABORT_FSC_MASK);
 }
 
 static struct acrn_vcpu *get_exit_vcpu(uint16_t pcpu_id)
@@ -151,6 +158,23 @@ static void record_vcpu_exit(struct acrn_vcpu *vcpu, uint32_t source, int32_t st
 	last->hpfar = regs->hpfar;
 	last->ec = (source == ARM64_VCPU_DEBUG_EXIT_SYNC) ?
 		(uint32_t)ESR_EL2_EC(regs->esr) : ARM64_VCPU_DEBUG_EXIT_EC_INVALID;
+	last->abort_type = ARM64_VCPU_DEBUG_ABORT_NONE;
+	last->abort_fsc = 0U;
+	if (source == ARM64_VCPU_DEBUG_EXIT_SYNC) {
+		last->abort_fsc = arm64_abort_fsc(regs->esr);
+		switch (ESR_EL2_EC(regs->esr)) {
+		case ESR_EL2_EC_IABT_LOW:
+		case ESR_EL2_EC_IABT_CUR:
+			last->abort_type = ARM64_VCPU_DEBUG_ABORT_INSTRUCTION;
+			break;
+		case ESR_EL2_EC_DABT_LOW:
+		case ESR_EL2_EC_DABT_CUR:
+			last->abort_type = ARM64_VCPU_DEBUG_ABORT_DATA;
+			break;
+		default:
+			break;
+		}
+	}
 	last->source = source;
 	last->status = status;
 	last->tsc = cpu_ticks();
@@ -273,10 +297,11 @@ static int32_t handle_mmio_abort(struct acrn_vcpu *vcpu)
 	int32_t ret;
 
 	/*
-	 * Unmapped stage-2 device windows intentionally raise data-abort exits.
-	 * When ESR.ISV is set, the syndrome gives the access width, direction, and
-	 * source/target GPR so the generic MMIO emulator can complete the access
-	 * without decoding the original instruction bytes.
+	 * Data aborts are load/store memory aborts. SIMA intentionally leaves
+	 * guest device IPA windows unmapped at stage-2 so reads and writes trap
+	 * here and become MMIO requests. Instruction aborts are fetch failures and
+	 * must not use this path because ESR.DABT fields describe data access size,
+	 * direction, and source/target GPR.
 	 */
 	if ((esr & ESR_DABT_ISV) == 0UL) {
 		return -EINVAL;
@@ -311,6 +336,25 @@ static int32_t handle_mmio_abort(struct acrn_vcpu *vcpu)
 	}
 
 	return ret;
+}
+
+static int32_t handle_instruction_abort(struct acrn_vcpu *vcpu)
+{
+	const struct cpu_regs *regs = &vcpu->arch.regs;
+	uint64_t ipa = arm64_fault_ipa(regs);
+	uint32_t fsc = arm64_abort_fsc(regs->esr);
+
+	/*
+	 * Instruction aborts are guest instruction-fetch failures, such as
+	 * executing from an unmapped stage-2 IPA, an execute-never mapping, or a
+	 * permission fault. They are captured for diagnostics but are not emulated
+	 * as MMIO because no load/store value or target register exists.
+	 */
+	pr_err("arm64 instruction abort vm%u-vcpu%u ipa=0x%lx far=0x%lx hpfar=0x%lx fsc=0x%x esr=0x%lx elr=0x%lx",
+		vcpu->vm->vm_id, vcpu->vcpu_id, ipa, regs->far, regs->hpfar,
+		fsc, regs->esr, regs->elr);
+
+	return -EFAULT;
 }
 
 static struct acrn_vcpu *psci_target_vcpu(struct acrn_vm *vm, uint64_t mpidr)
@@ -454,6 +498,15 @@ static int32_t handle_hvc64(struct acrn_vcpu *vcpu)
 	return ret;
 }
 
+static void guest_timer_write_live_ctl(struct arm64_vcpu_guest_ctx *gctx)
+{
+	uint32_t ctl = (gctx->timer_virq == ARM64_GIC_PPI_PHYSICAL_TIMER) ?
+		gctx->cntp_ctl_el0 : gctx->cntv_ctl_el0;
+
+	gctx->cntv_el2_masked = false;
+	write_cntv_ctl_el0(ctl & (CNTV_CTL_ENABLE | CNTV_CTL_IMASK));
+}
+
 /*
  * The host owns CNTP for the per-pCPU scheduler tick, so guest accesses to
  * either the physical-timer or virtual-timer ABI are backed by the vCPU's CNTV
@@ -502,7 +555,7 @@ static int32_t handle_timer_sysreg(struct acrn_vcpu *vcpu, uint64_t sysreg, bool
 			}
 		} else {
 			gctx->cntp_ctl_el0 = write_ctl;
-			write_cntv_ctl_el0(gctx->cntp_ctl_el0);
+			guest_timer_write_live_ctl(gctx);
 		}
 		break;
 	case SYSREG_CNTV_CTL_EL0:
@@ -514,7 +567,7 @@ static int32_t handle_timer_sysreg(struct acrn_vcpu *vcpu, uint64_t sysreg, bool
 			}
 		} else {
 			gctx->cntv_ctl_el0 = write_ctl;
-			write_cntv_ctl_el0(gctx->cntv_ctl_el0);
+			guest_timer_write_live_ctl(gctx);
 		}
 		break;
 	case SYSREG_CNTP_CVAL_EL0:
@@ -526,6 +579,7 @@ static int32_t handle_timer_sysreg(struct acrn_vcpu *vcpu, uint64_t sysreg, bool
 		} else {
 			gctx->cntp_cval_el0 = write_value;
 			write_cntv_cval_el0(gctx->cntp_cval_el0);
+			guest_timer_write_live_ctl(gctx);
 		}
 		break;
 	case SYSREG_CNTV_CVAL_EL0:
@@ -537,6 +591,7 @@ static int32_t handle_timer_sysreg(struct acrn_vcpu *vcpu, uint64_t sysreg, bool
 		} else {
 			gctx->cntv_cval_el0 = write_value;
 			write_cntv_cval_el0(gctx->cntv_cval_el0);
+			guest_timer_write_live_ctl(gctx);
 		}
 		break;
 	case SYSREG_CNTP_TVAL_EL0:
@@ -549,6 +604,7 @@ static int32_t handle_timer_sysreg(struct acrn_vcpu *vcpu, uint64_t sysreg, bool
 			val = now + (uint64_t)(int32_t)(uint32_t)write_value;
 			gctx->cntp_cval_el0 = val;
 			write_cntv_cval_el0(val);
+			guest_timer_write_live_ctl(gctx);
 		}
 		break;
 	case SYSREG_CNTV_TVAL_EL0:
@@ -561,6 +617,7 @@ static int32_t handle_timer_sysreg(struct acrn_vcpu *vcpu, uint64_t sysreg, bool
 			val = now + (uint64_t)(int32_t)(uint32_t)write_value;
 			gctx->cntv_cval_el0 = val;
 			write_cntv_cval_el0(val);
+			guest_timer_write_live_ctl(gctx);
 		}
 		break;
 	default:
@@ -579,6 +636,10 @@ static int32_t handle_timer_sysreg(struct acrn_vcpu *vcpu, uint64_t sysreg, bool
 	last->write = !read;
 	last->injected = false;
 	last->tsc = cpu_ticks();
+	if (!read) {
+		arm64_vcpu_trace_vtimer(vcpu, ARM64_VTIMER_TRACE_SYSREG,
+			last->virq, last->ctl, last->cval, true, false);
+	}
 
 	return ret;
 }
@@ -732,6 +793,9 @@ int32_t vcpu_exit_handler(struct acrn_vcpu *vcpu)
 	 * ELR, or deliberately leave the vCPU stopped on failure.
 	 */
 	switch (ec) {
+	case ESR_EL2_EC_IABT_LOW:
+		ret = handle_instruction_abort(vcpu);
+		break;
 	case ESR_EL2_EC_DABT_LOW:
 		ret = handle_mmio_abort(vcpu);
 		break;

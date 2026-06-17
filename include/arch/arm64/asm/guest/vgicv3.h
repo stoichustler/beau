@@ -143,6 +143,7 @@ void arm64_vgicv3_global_init(void);
 void arm64_vgicv3_init_vm(struct acrn_vm *vm, uint64_t cpu_affinity);
 void arm64_vgicv3_init_vcpu(struct acrn_vcpu *vcpu);
 void arm64_vgicv3_reset_vcpu(struct acrn_vcpu *vcpu);
+void arm64_vgicv3_arm_vtimer_backup(struct acrn_vcpu *vcpu);
 void arm64_vgicv3_cancel_vtimer_backup(struct acrn_vcpu *vcpu);
 void arm64_vgicv3_load_vcpu(struct acrn_vcpu *vcpu);
 void arm64_vgicv3_save_vcpu(struct acrn_vcpu *vcpu);

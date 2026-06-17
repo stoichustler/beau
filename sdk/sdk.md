@@ -1,3 +1,23 @@
+## Codex Working Requirements
+
+When Codex works on this repository, it must read this file first and also
+apply the repository-local skill under `sdk/codex`. Use `sdk/codex/SKILL.md` as
+the active SIMA hypervisor development workflow, and read
+`sdk/codex/references/architecture.md` when architecture details, invariants,
+commands, or validation checklists are needed.
+
+Codex must keep changes focused on the existing SIMA ARM64/QEMU/rk356x design,
+preserve the documented static VM and image-loading assumptions unless an
+explicit task changes them, announce intended file or area edits before making
+them, validate with the documented `scripts/kick.py` and `scripts/regress.py`
+flows when appropriate, and follow the English design-comment rules for ARM64
+virtualization code.
+
+Optimizations or behavior changes under `core/` require explicit human
+confirmation before implementation. Document and discuss common-code timer,
+scheduler, vCPU, VM, IRQ, or memory-management optimizations first, then wait for
+approval before editing shared core code.
+
 ## ARM64 Development Status
 
 The ARM64 bring-up currently targets QEMU `virt` for automated validation and
@@ -171,7 +191,7 @@ boot logs settle to show the `console:\>` prompt.
   - `threads`
   - `schedstat`
   - `vmap`
-  - `irqs`
+  - `irqstat`
   - `dumpstat [vm id]`
   - `vsh <vm id>`
 - `vsh <vm id>` switches the serial console to a VM vPL011/vUART console.
@@ -185,11 +205,16 @@ boot logs settle to show the `console:\>` prompt.
   - `resched` counts requests raised through `make_reschedule_request()`,
     including tick, wake, yield, and remote reschedule paths.
   - `runqueue` is the current count of runnable threads bound to that pCPU.
-- `irqs` prints a short IRQ name/purpose column when the architecture can decode
-  it. ARM64 maps ACRN IRQ numbers back to GIC SGI/PPI/SPI sources and names the
-  EL2-owned SMP-call, physical-timer, virtual-timer, and vGIC-maintenance
-  interrupts. Per-pCPU counts use aligned `cpuN:count` fields, and `active`
-  shows whether the IRQ is allocated in the common IRQ table.
+- `irqstat` prints a short IRQ name/purpose column when the architecture can
+  decode it. ARM64 maps ACRN IRQ numbers back to GIC SGI/PPI/SPI sources and
+  names the EL2-owned SMP-call, physical-timer, virtual-timer, and
+  vGIC-maintenance interrupts. It suppresses IRQs that have neither an active
+  handler nor any recorded count, so unused INTIDs do not fill the table.
+  Per-pCPU counts include every pCPU in aligned `cpuN:count` fields, and
+  `active` shows whether the IRQ is allocated in the common IRQ table. IRQ
+  counters saturate at `UINT64_MAX` instead of wrapping; saturated per-pCPU
+  fields print as `cpuN:sat`, total prints `sat`, and `overflow` reports whether
+  any per-pCPU counter or total sum has saturated.
 - `dumpstat [vm id]` prints all created vCPUs in the VM, including the saved
   ARM64 register image, scheduler state, current-thread status, recent vCPU
   exit reason, recent virtual IRQ injection, recent guest timer programming or
@@ -306,8 +331,8 @@ The following have been verified on QEMU with `-smp 8`:
 - `vmap` shows VM0/VM1/VM2 stage-2 RAM identity mappings plus vGICD, vGICR,
   and vPL011 vio windows.
 - Boot logs show each VM image copied to 1:1 RAM.
-- `irqs` uses a narrow-screen-friendly format and shows the virtual timer PPI
-  handler receiving counts on Zephyr AP pCPUs.
+- `irqstat` uses a narrow-screen-friendly format and shows the virtual timer
+  PPI handler receiving counts on Zephyr AP pCPUs.
 - Zephyr no longer traps on `GICD_IPRIORITYR` byte writes.
 - Zephyr AP virtual timer interrupts no longer hit the host unexpected IRQ path.
 - LK still boots with 4 CPUs after Zephyr became the service VM.
@@ -340,7 +365,14 @@ Status as of 2026-06-16:
   and `vsh 1`). VM2 Linux still timed out waiting for `clou login:`.
 - Keep VM2 Linux at 4 vCPUs; no single-vCPU fallback validation is being used.
 - Keep Linux assets under `sdk/images/linux`; the active Linux DT source is
-  `sdk/images/linux/sima-linux.dts`.
+  `sdk/images/linux/sima-linux.dts`. This DTS must only be changed by an
+  explicit manual edit. Do not let build scripts, regression scripts, or helper
+  tools rewrite it implicitly.
+- After manually changing `sdk/images/linux/sima-linux.dts`, regenerate the
+  embedded DTB explicitly with:
+  `dtc -I dts -O dtb -o sdk/images/linux/sima-linux.dtb sdk/images/linux/sima-linux.dts`.
+  The SIMA image must then be rebuilt because `sima-linux.dtb` is included by
+  `arch/arm64/platform/qemu/platform_image.S`.
 - `sdk/images/linux/sima-linux.dts` currently keeps the base Linux bootargs and
   adds an `initcall_blacklist` for ACPI/Xen/TPM/ATA initcalls that are not
   useful on the SIMA virtual platform. Do not re-add earlier diagnostic
@@ -454,7 +486,7 @@ Recommended resume point:
 4. Switch with `vsh 2`, wait for `clou login:`, then immediately input
    `root`, password `root`, and run `help`.
 5. If Linux stalls before login or emits RCU timer warnings, return with Ctrl-D
-   and capture `dumpstat 2`, `vcpus`, `schedstat`, and `irqs`.
+   and capture `dumpstat 2`, `vcpus`, `schedstat`, and `irqstat`.
 6. Treat a VM2 fix as complete only after `root` / `root` / `help` succeeds
    without RCU timer-softirq warnings while VM0 and VM1 remain responsive.
 
@@ -475,6 +507,11 @@ auditable when memory, interrupt, and CPU state crosses an EL2/EL1 boundary.
   translating a stage-2 abort into an MMIO request, loading or unloading EL2
   guest context, switching between host IRQ and guest IRQ paths, and validating
   VM memory isolation.
+- For abort/trap handling code, comments must distinguish instruction aborts
+  from data aborts and from broader memory abort terminology. State the trigger
+  scenario being handled, such as instruction fetch from unmapped or
+  execute-never memory, load/store MMIO data aborts, stage-2 translation faults,
+  permission faults, or unexpected host EL2 aborts.
 - Document the design invariant and failure mode when code enforces isolation,
   ordering, or ownership. Examples: QEMU RTOS stage-2 RAM is identity-mapped,
   vGIC MMIO is protected by the VM vGIC lock, and physical INTIDs must pass
@@ -524,7 +561,12 @@ virtualization port.
    driver takes over.
 3. Extend `scripts/regress.py` with more VM2 Linux root-shell commands, reboot
    coverage, repeated cold boots, and saved log artifacts suitable for CI.
-4. Move QEMU platform memory and device discovery toward host-FDT-derived data
+4. Audit ARM64 abort handling to confirm whether guest instruction aborts are
+   trapped and diagnosed correctly. Cover instruction fetch aborts separately
+   from data abort MMIO paths, document the expected ESR/FAR/HPFAR trigger
+   scenarios, and update comments so instruction abort, data abort, and broader
+   memory abort terminology are not conflated.
+5. Move QEMU platform memory and device discovery toward host-FDT-derived data
    where it helps reduce static board assumptions.
-5. Bring up rk356x hardware manually, then capture the validated RAM, UART,
+6. Bring up rk356x hardware manually, then capture the validated RAM, UART,
    GIC, and boot-image placement assumptions back into the platform files.

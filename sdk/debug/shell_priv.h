@@ -67,7 +67,7 @@ struct shell {
 #define SHELL_CMD_LOG_LVL_PARAM		"[<console_loglevel> [<mem_loglevel> [npk_loglevel]]]"
 #define SHELL_CMD_LOG_LVL_HELP		"loglevel {0-6}"
 
-#define SHELL_CMD_DUMP_HOST_MEM		"hmm"
+#define SHELL_CMD_DUMP_HOST_MEM		"mem"
 #define SHELL_CMD_DUMP_HOST_MEM_PARAM	"<addr, length>"
 #define SHELL_CMD_DUMP_HOST_MEM_HELP	"dump host memory: address(hex), size(dec in bytes)"
 
@@ -83,7 +83,7 @@ struct shell {
 #define SHELL_CMD_SCHED_PARAM		NULL
 #define SHELL_CMD_SCHED_HELP		"list per-pcpu scheduler statistics"
 
-#define SHELL_CMD_IRQ_STATS		"irqs"
+#define SHELL_CMD_IRQ_STATS		"irqstat"
 #define SHELL_CMD_IRQ_STATS_PARAM	NULL
 #define SHELL_CMD_IRQ_STATS_HELP	"list active interrupt names and per-pcpu counts"
 

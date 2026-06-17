@@ -46,6 +46,7 @@
 #define ESR_DABT_SRT_MASK	0x1fUL
 #define ESR_DABT_SF		(1UL << 15U)
 #define ESR_DABT_WNR		(1UL << 6U)
+#define ESR_ABORT_FSC_MASK	0x3fUL
 
 extern char arm64_exception_vectors[];
 extern void vcpu_exit_return(void);

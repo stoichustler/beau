@@ -24,9 +24,23 @@
 #define ARM64_VCPU_DEBUG_EXIT_SYNC		1U
 #define ARM64_VCPU_DEBUG_EXIT_IRQ		2U
 #define ARM64_VCPU_DEBUG_EXIT_EC_INVALID	UINT32_MAX
+#define ARM64_VCPU_DEBUG_ABORT_NONE		0U
+#define ARM64_VCPU_DEBUG_ABORT_INSTRUCTION	1U
+#define ARM64_VCPU_DEBUG_ABORT_DATA		2U
 #define ARM64_VCPU_DEBUG_INVALID_VCPU_ID	0xffffU
 #define ARM64_VCPU_DEBUG_VGIC_SYNC		1U
 #define ARM64_VCPU_DEBUG_VGIC_MAINTENANCE	2U
+#define ARM64_VCPU_VTIMER_TRACE_NUM		16U
+#define ARM64_VTIMER_TRACE_LOAD		1U
+#define ARM64_VTIMER_TRACE_UNLOAD		2U
+#define ARM64_VTIMER_TRACE_SYSREG		3U
+#define ARM64_VTIMER_TRACE_PPI			4U
+#define ARM64_VTIMER_TRACE_POLL		5U
+#define ARM64_VTIMER_TRACE_UPDATE		6U
+#define ARM64_VTIMER_TRACE_INJECT		7U
+#define ARM64_VTIMER_TRACE_EOI			8U
+#define ARM64_VTIMER_TRACE_REQUEUE		9U
+#define ARM64_VTIMER_TRACE_BACKUP		10U
 
 /*
  * EL2 control state that is programmed around vCPU scheduling. The guest GPRs
@@ -94,6 +108,8 @@ struct arm64_vcpu_last_exit {
 	uint64_t far;
 	uint64_t hpfar;
 	uint32_t ec;
+	uint32_t abort_type;
+	uint32_t abort_fsc;
 	uint32_t source;
 	int32_t status;
 };
@@ -243,6 +259,38 @@ struct arm64_vcpu_last_guest_return {
 	bool host_active;
 };
 
+/*
+ * The vtimer trace ring is intentionally small and per-vCPU. It records only
+ * lifecycle edges that can explain a lost or repeated timer interrupt without
+ * turning every guest exit into a log event.
+ */
+struct arm64_vcpu_vtimer_trace_entry {
+	uint64_t tsc;
+	uint64_t cntvct;
+	uint64_t cval;
+	uint64_t lr0;
+	uint64_t hcr;
+	uint64_t misr;
+	uint32_t ctl;
+	uint32_t virq;
+	uint16_t pcpu_id;
+	uint8_t event;
+	uint8_t used_lrs;
+	bool expired;
+	bool masked;
+	bool pending;
+	bool active;
+	bool level;
+	bool write;
+	bool injected;
+};
+
+struct arm64_vcpu_vtimer_trace {
+	uint32_t head;
+	uint32_t count;
+	struct arm64_vcpu_vtimer_trace_entry entry[ARM64_VCPU_VTIMER_TRACE_NUM];
+};
+
 struct arm64_vcpu_debug_info {
 	struct arm64_vcpu_last_exit last_exit;
 	struct arm64_vcpu_last_irq last_irq;
@@ -254,6 +302,7 @@ struct arm64_vcpu_debug_info {
 	struct arm64_vcpu_last_vgic last_vgic_maintenance;
 	struct arm64_vcpu_last_wfx last_wfx;
 	struct arm64_vcpu_last_guest_return last_return;
+	struct arm64_vcpu_vtimer_trace vtimer_trace;
 };
 
 struct acrn_vcpu_arch {
@@ -279,6 +328,8 @@ struct acrn_vcpu;
 int32_t arm64_process_vcpu_requests(struct acrn_vcpu *vcpu);
 bool arm64_is_acrn_hypercall(uint64_t hcall_id);
 int32_t arm64_dispatch_hypercall(struct acrn_vcpu *vcpu);
+void arm64_vcpu_trace_vtimer(struct acrn_vcpu *vcpu, uint32_t event,
+	uint32_t virq, uint32_t ctl, uint64_t cval, bool write, bool injected);
 
 #endif /* ASSEMBLER */
 

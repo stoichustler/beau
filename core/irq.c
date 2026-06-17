@@ -195,7 +195,11 @@ static void do_irq_common(const uint32_t irq, bool handle_softirq)
 
 		/* XXX irq_alloc_bitmap is used lockless here */
 		if (bitmap_test((uint16_t)(irq & 0x3FU), irq_alloc_bitmap + (irq >> 6U))) {
-			per_cpu(irq_count, get_pcpu_id())[irq]++;
+			uint64_t *count = &per_cpu(irq_count, get_pcpu_id())[irq];
+
+			if (*count != UINT64_MAX) {
+				(*count)++;
+			}
 			handle_irq(desc);
 		}
 	}

@@ -257,7 +257,7 @@ class QemuSession:
         try:
             self.send(CTRL_D)
             self.expect(PROMPT, f"return to SIMA shell for {label}", timeout=5.0, keepalive=ENTER)
-            for line in ("vcpus", "schedstat", "irqs", f"dumpstat {vmid}"):
+            for line in ("vcpus", "schedstat", "irqstat", f"dumpstat {vmid}"):
                 self.send(line + ENTER)
                 self.expect(PROMPT, f"{line} diagnostics", timeout=15.0, keepalive=ENTER)
         except Exception as err:
@@ -288,7 +288,7 @@ def run_qemu(args, cmd):
             "runqueue",
         ])
         qemu.command("vmap", ["arm64 memory mappings", "vm-0 s2", "vm-1 s2", "vm-2 s2"])
-        qemu.command("irqs", ["irq statistics"])
+        qemu.command("irqstat", ["irqstat:"])
         qemu.command(
             "dumpstat 0",
             [
@@ -350,7 +350,7 @@ def main():
         if not args.no_build:
             print(render(build, args.toolchains))
         print(quote(qemu))
-        print("checks: prompt, vcpus, schedstat, vmap, irqs, vsh 0, ctrl-d, vsh 1, ctrl-d, vsh 2, Linux root login")
+        print("checks: prompt, vcpus, schedstat, vmap, irqstat, vsh 0, ctrl-d, vsh 1, ctrl-d, vsh 2, Linux root login")
         return 0
 
     if not args.no_build:

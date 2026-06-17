@@ -51,18 +51,19 @@
 
 #define GICR_WAKER_PROCESSOR_SLEEP	BIT32(1U)
 #define GICR_WAKER_CHILDREN_ASLEEP	BIT32(2U)
+#define GICR_CTLR_RWP			BIT32(3U)
 
 #define GITS_CTLR			0x0000U
 #define GITS_TYPER			0x0008U
-#define GITS_CTLR_ENABLE		BIT32(0U)
 #define GITS_CTLR_QUIESCENT		BIT32(31U)
 
 #define GIC_INTIDS_PER_REG		32U
-#define GIC_PRI_PER_REG		4U
 #define GIC_CFG_PER_REG		16U
 #define GIC_SPI_BASE			32U
+#define GIC_SPECIAL_INTID_BASE		1020U
 #define GIC_DEFAULT_PRIORITY		0x80U
 #define GIC_LOWEST_PRIORITY		0xffU
+#define GIC_WAIT_RETRIES		1000000U
 
 static uint64_t gicr_base_by_pcpu[MAX_PCPU_NUM];
 static uint32_t gic_line_count;
@@ -139,29 +140,75 @@ static uint32_t gic_intid_mask(uint32_t intid)
 	return BIT32(intid % GIC_INTIDS_PER_REG);
 }
 
+static uint32_t gic_intid_mask_until(uint32_t base_intid, uint32_t limit_intid)
+{
+	uint32_t count = limit_intid - base_intid;
+
+	return (count >= GIC_INTIDS_PER_REG) ? UINT32_MAX : (BIT32(count) - 1U);
+}
+
+static uint32_t gic_icfgr_mask_until(uint32_t base_intid, uint32_t limit_intid)
+{
+	uint32_t count = limit_intid - base_intid;
+
+	/*
+	 * ICFGR stores two bits per INTID. Preserve special INTIDs at the tail of
+	 * the final register while normalizing every implemented SPI to level.
+	 */
+	return (count >= GIC_CFG_PER_REG) ? UINT32_MAX : (BIT32(count * 2U) - 1U);
+}
+
+static bool gic_is_programmable_spi(uint32_t intid)
+{
+	return (intid >= GIC_SPI_BASE) && (intid < gic_line_count) &&
+		(intid < GIC_SPECIAL_INTID_BASE);
+}
+
 static uint64_t gic_current_rdist(void)
 {
 	uint16_t pcpu_id = get_pcpu_id();
+	uint64_t rdist;
 
 	if (pcpu_id >= MAX_PCPU_NUM) {
 		panic("invalid pcpu%hu for gic redistributor", pcpu_id);
 	}
 
-	return gicr_base_by_pcpu[pcpu_id];
+	rdist = gicr_base_by_pcpu[pcpu_id];
+	if (rdist == 0UL) {
+		panic("no gic redistributor for current pcpu%hu", pcpu_id);
+	}
+
+	return rdist;
 }
 
 static void gicd_wait_rwp(void)
 {
-	while ((gicd_read32(GICD_CTLR) & GICD_CTLR_RWP) != 0U) {
+	uint32_t retries;
+
+	for (retries = GIC_WAIT_RETRIES; retries > 0U; retries--) {
+		if ((gicd_read32(GICD_CTLR) & GICD_CTLR_RWP) == 0U) {
+			return;
+		}
 		cpu_relax();
 	}
+
+	panic("gicd rwp timeout base=0x%lx ctlr=0x%x",
+		arm64_platform_gicd_base(), gicd_read32(GICD_CTLR));
 }
 
 static void gicr_wait_rwp(uint64_t rdist)
 {
-	while ((gicr_read32(rdist, GICR_CTLR) & BIT32(3U)) != 0U) {
+	uint32_t retries;
+
+	for (retries = GIC_WAIT_RETRIES; retries > 0U; retries--) {
+		if ((gicr_read32(rdist, GICR_CTLR) & GICR_CTLR_RWP) == 0U) {
+			return;
+		}
 		cpu_relax();
 	}
+
+	panic("gicr rwp timeout rdist=0x%lx ctlr=0x%x",
+		rdist, gicr_read32(rdist, GICR_CTLR));
 }
 
 static uint64_t gic_mpidr_to_affinity(uint64_t mpidr)
@@ -177,17 +224,37 @@ static uint64_t gic_mpidr_to_affinity(uint64_t mpidr)
 static void gic_discover_rdists(void)
 {
 	uint64_t rdist = arm64_platform_gicr_base();
+	uint64_t rdist_size = arm64_platform_gicr_size();
+	uint64_t rdist_stride = arm64_platform_gicr_stride();
+	uint32_t frame_count;
 	uint32_t frame;
+	uint16_t pcpu_id;
+
+	if ((rdist == 0UL) || (rdist_size == 0UL) || (rdist_stride == 0UL)) {
+		panic("invalid gic redistributor range base=0x%lx size=0x%lx stride=0x%lx",
+			rdist, rdist_size, rdist_stride);
+	}
+
+	frame_count = (uint32_t)(rdist_size / rdist_stride);
+	if (frame_count > MAX_PCPU_NUM) {
+		frame_count = MAX_PCPU_NUM;
+	}
+	if (frame_count == 0U) {
+		panic("empty gic redistributor range base=0x%lx size=0x%lx stride=0x%lx",
+			rdist, rdist_size, rdist_stride);
+	}
+
+	(void)memset(gicr_base_by_pcpu, 0U, sizeof(gicr_base_by_pcpu));
 
 	/*
 	 * Redistributor frames are discovered by matching the GICR_TYPER affinity
 	 * value to each pCPU's MPIDR. This avoids assuming that frame order and
-	 * logical pCPU IDs are identical.
+	 * logical pCPU IDs are identical. The platform redistributor window bounds
+	 * the scan, while GICR_TYPER.Last lets hardware terminate the walk early.
 	 */
-	for (frame = 0U; frame < MAX_PCPU_NUM; frame++) {
+	for (frame = 0U; frame < frame_count; frame++) {
 		uint64_t typer = gicr_read64(rdist, GICR_TYPER);
 		uint64_t aff = (typer >> GICR_TYPER_AFF_SHIFT) & GICR_TYPER_AFF_MASK;
-		uint16_t pcpu_id;
 
 		for (pcpu_id = 0U; pcpu_id < MAX_PCPU_NUM; pcpu_id++) {
 			if (gic_mpidr_to_affinity(per_cpu(arch.mpidr, pcpu_id)) == aff) {
@@ -201,6 +268,13 @@ static void gic_discover_rdists(void)
 		}
 
 		rdist += arm64_platform_gicr_stride();
+	}
+
+	for (pcpu_id = 0U; pcpu_id < MAX_PCPU_NUM; pcpu_id++) {
+		if (gicr_base_by_pcpu[pcpu_id] == 0UL) {
+			panic("missing gic redistributor for pcpu%hu mpidr=0x%lx",
+				pcpu_id, per_cpu(arch.mpidr, pcpu_id));
+		}
 	}
 }
 
@@ -250,13 +324,19 @@ static void gicd_init(void)
 {
 	uint32_t typer;
 	uint32_t i;
+	uint32_t line_limit;
 
 	/*
 	 * Bring the distributor to a known non-secure Group-1 state. SPIs are
 	 * disabled, pending/active state is cleared, priorities are normalized, and
 	 * routes default to the BSP until a fuller interrupt-routing policy exists.
+	 * Affinity routing is enabled before programming IROUTER because GICv3 SPI
+	 * routing is defined through affinity-based target registers.
 	 */
 	gicd_write32(GICD_CTLR, 0U);
+	gicd_wait_rwp();
+
+	gicd_write32(GICD_CTLR, GICD_CTLR_ARE_NS);
 	gicd_wait_rwp();
 
 	typer = gicd_read32(GICD_TYPER);
@@ -264,21 +344,32 @@ static void gicd_init(void)
 	if (gic_line_count > IRQ_NUM_GIC_DOMAIN) {
 		gic_line_count = IRQ_NUM_GIC_DOMAIN;
 	}
-
-	for (i = GIC_SPI_BASE; i < gic_line_count; i += GIC_INTIDS_PER_REG) {
-		gicd_write32(GICD_ICENABLER + gic_intid_reg(i), UINT32_MAX);
-		gicd_write32(GICD_ICPENDR + gic_intid_reg(i), UINT32_MAX);
-		gicd_write32(GICD_ICACTIVER + gic_intid_reg(i), UINT32_MAX);
-		gicd_write32(GICD_IGROUPR + gic_intid_reg(i), UINT32_MAX);
+	line_limit = gic_line_count;
+	if (line_limit > GIC_SPECIAL_INTID_BASE) {
+		line_limit = GIC_SPECIAL_INTID_BASE;
 	}
 
-	for (i = GIC_SPI_BASE; i < gic_line_count; i++) {
+	for (i = GIC_SPI_BASE; i < line_limit; i += GIC_INTIDS_PER_REG) {
+		uint32_t mask = gic_intid_mask_until(i, line_limit);
+
+		gicd_write32(GICD_ICENABLER + gic_intid_reg(i), mask);
+		gicd_write32(GICD_ICPENDR + gic_intid_reg(i), mask);
+		gicd_write32(GICD_ICACTIVER + gic_intid_reg(i), mask);
+		gicd_write32(GICD_IGROUPR + gic_intid_reg(i),
+			gicd_read32(GICD_IGROUPR + gic_intid_reg(i)) | mask);
+	}
+
+	for (i = GIC_SPI_BASE; i < line_limit; i++) {
 		gicd_set_priority(i, GIC_DEFAULT_PRIORITY);
-		gicd_write64(GICD_IROUTER + (i * 8U), per_cpu(arch.mpidr, BSP_CPU_ID));
+		gicd_write64(GICD_IROUTER + (i * 8U),
+			gic_mpidr_to_affinity(per_cpu(arch.mpidr, BSP_CPU_ID)));
 	}
 
-	for (i = GIC_SPI_BASE; i < gic_line_count; i += GIC_CFG_PER_REG) {
-		gicd_write32(GICD_ICFGR + ((i / GIC_CFG_PER_REG) * 4U), 0U);
+	for (i = GIC_SPI_BASE; i < line_limit; i += GIC_CFG_PER_REG) {
+		uint32_t reg = GICD_ICFGR + ((i / GIC_CFG_PER_REG) * 4U);
+		uint32_t mask = gic_icfgr_mask_until(i, line_limit);
+
+		gicd_write32(reg, gicd_read32(reg) & ~mask);
 	}
 
 	gicd_write32(GICD_CTLR, GICD_CTLR_ARE_NS | GICD_CTLR_ENABLE_G1NS);
@@ -290,6 +381,7 @@ static void gits_init(void)
 	uint64_t base = arm64_platform_gits_base();
 	uint64_t size = arm64_platform_gits_size();
 	uint32_t ctlr;
+	uint32_t retries;
 
 	if ((base == 0UL) || (size == 0UL)) {
 		gicv3_its_present = false;
@@ -297,25 +389,38 @@ static void gits_init(void)
 	}
 
 	gits_write32(GITS_CTLR, 0U);
-	do {
+	for (retries = GIC_WAIT_RETRIES; retries > 0U; retries--) {
 		ctlr = gits_read32(GITS_CTLR);
-	} while ((ctlr & GITS_CTLR_QUIESCENT) == 0U);
+		if ((ctlr & GITS_CTLR_QUIESCENT) != 0U) {
+			gicv3_its_present = true;
+			pr_info("gicv3 its: base=0x%lx size=0x%lx typer=0x%lx",
+				base, size, gits_read64(GITS_TYPER));
+			return;
+		}
+		cpu_relax();
+	}
 
-	gicv3_its_present = true;
-	pr_info("gicv3 its: base=0x%lx size=0x%lx typer=0x%lx",
-		base, size, gits_read64(GITS_TYPER));
+	panic("gic its quiesce timeout base=0x%lx size=0x%lx ctlr=0x%x",
+		base, size, gits_read32(GITS_CTLR));
 }
 
 static void gicr_wake(uint64_t rdist)
 {
 	uint32_t val = gicr_read32(rdist, GICR_WAKER);
+	uint32_t retries;
 
 	val &= ~GICR_WAKER_PROCESSOR_SLEEP;
 	gicr_write32(rdist, GICR_WAKER, val);
 
-	while ((gicr_read32(rdist, GICR_WAKER) & GICR_WAKER_CHILDREN_ASLEEP) != 0U) {
+	for (retries = GIC_WAIT_RETRIES; retries > 0U; retries--) {
+		if ((gicr_read32(rdist, GICR_WAKER) & GICR_WAKER_CHILDREN_ASLEEP) == 0U) {
+			return;
+		}
 		cpu_relax();
 	}
+
+	panic("gicr wake timeout rdist=0x%lx waker=0x%x",
+		rdist, gicr_read32(rdist, GICR_WAKER));
 }
 
 static void gicr_init(uint64_t rdist)
@@ -422,7 +527,7 @@ void arm64_gicv3_enable_irq(uint32_t intid)
 		gicr_clear_pending_active(rdist, intid);
 		gicr_enable_irq(rdist, intid);
 		gicr_wait_rwp(rdist);
-	} else if (intid < gic_line_count) {
+	} else if (gic_is_programmable_spi(intid)) {
 		gicd_clear_pending_active(intid);
 		gicd_write32(GICD_ISENABLER + gic_intid_reg(intid), gic_intid_mask(intid));
 		gicd_wait_rwp();
@@ -437,7 +542,7 @@ void arm64_gicv3_disable_irq(uint32_t intid)
 		rdist = gic_current_rdist();
 		gicr_disable_irq(rdist, intid);
 		gicr_wait_rwp(rdist);
-	} else if (intid < gic_line_count) {
+	} else if (gic_is_programmable_spi(intid)) {
 		gicd_write32(GICD_ICENABLER + gic_intid_reg(intid), gic_intid_mask(intid));
 		gicd_wait_rwp();
 	}
@@ -452,7 +557,7 @@ void arm64_gicv3_clear_irq(uint32_t intid)
 		gicr_clear_pending(rdist, intid);
 		gicr_write32(rdist, GICR_SGI_BASE + GICD_ICACTIVER + gic_intid_reg(intid),
 			gic_intid_mask(intid));
-	} else if (intid < gic_line_count) {
+	} else if (gic_is_programmable_spi(intid)) {
 		gicd_clear_pending_active(intid);
 	}
 }

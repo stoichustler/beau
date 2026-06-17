@@ -144,6 +144,35 @@ struct arm64_vcpu_last_sgi {
 	uint16_t delivered_mask;
 };
 
+/*
+ * Target-side SGI state is recorded after a trapped ICC_SGI1R_EL1 injection.
+ * It lets dumpstat distinguish "source sent an IPI" from "target has a
+ * pending/requested virtual interrupt ready to wake an idle guest CPU".
+ */
+struct arm64_vcpu_last_sgi_target {
+	uint64_t tsc;
+	uint64_t source_value;
+	uint64_t lr0;
+	uint64_t lr1;
+	uint64_t hcr;
+	uint64_t misr;
+	uint32_t intid;
+	int32_t status;
+	uint16_t source_vcpu_id;
+	uint16_t target_vcpu_id;
+	uint16_t local_enabled;
+	uint16_t local_pending;
+	uint16_t local_active;
+	uint8_t used_lrs;
+	bool request_pending;
+	bool target_running;
+	bool target_current;
+	bool desc_enabled;
+	bool desc_pending;
+	bool desc_active;
+	bool desc_level;
+};
+
 struct arm64_vcpu_last_psci {
 	uint64_t tsc;
 	uint64_t target_mpidr;
@@ -296,6 +325,7 @@ struct arm64_vcpu_debug_info {
 	struct arm64_vcpu_last_irq last_irq;
 	struct arm64_vcpu_last_timer last_timer;
 	struct arm64_vcpu_last_sgi last_sgi;
+	struct arm64_vcpu_last_sgi_target last_sgi_target;
 	struct arm64_vcpu_last_psci last_psci;
 	struct arm64_vcpu_last_cpuif last_cpuif;
 	struct arm64_vcpu_last_vgic last_vgic_sync;
@@ -328,6 +358,7 @@ struct acrn_vcpu;
 int32_t arm64_process_vcpu_requests(struct acrn_vcpu *vcpu);
 bool arm64_is_acrn_hypercall(uint64_t hcall_id);
 int32_t arm64_dispatch_hypercall(struct acrn_vcpu *vcpu);
+void arm64_prepare_linux_vcpu_context(struct acrn_vcpu *vcpu, uint64_t entry, uint64_t x0);
 void arm64_vcpu_trace_vtimer(struct acrn_vcpu *vcpu, uint32_t event,
 	uint32_t virq, uint32_t ctl, uint64_t cval, bool write, bool injected);
 

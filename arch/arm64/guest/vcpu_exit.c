@@ -396,9 +396,8 @@ static int64_t handle_psci_cpu_on(struct acrn_vcpu *vcpu)
 		if (target->state == VCPU_RUNNING) {
 			ret = PSCI_RET_DENIED;
 		} else {
-			target->arch.regs.elr = vcpu->arch.regs.x2;
-			target->arch.regs.x0 = vcpu->arch.regs.x3;
-			target->arch.regs.spsr = (vcpu->arch.regs.spsr & DAIF_ALL) | 0x5UL;
+			arm64_prepare_linux_vcpu_context(target,
+				vcpu->arch.regs.x2, vcpu->arch.regs.x3);
 			launch_vcpu(target);
 			ret = PSCI_RET_SUCCESS;
 		}

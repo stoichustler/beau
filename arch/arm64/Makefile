@@ -37,7 +37,7 @@ ARCH_CFLAGS += -mno-outline-atomics
 ARCH_ASFLAGS +=
 
 HOST_S_SRCS += arch/arm64/boot/cpu_entry.S
-HOST_S_SRCS += arch/arm64/intr.S
+HOST_S_SRCS += arch/arm64/vector.S
 HOST_S_SRCS += arch/arm64/sched.S
 
 HOST_C_SRCS += arch/arm64/init.c

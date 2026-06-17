@@ -85,7 +85,6 @@ else
 	Q := @
 endif
 
--include ../paths.make
 libdir ?= /usr/lib
 sysconfdir ?= /etc
 
@@ -423,15 +422,15 @@ tags:
 
 .PHONY: clean
 clean:
-	rm -rf $(VERSION)
-	rm -rf $(HV_OBJDIR)
+	@rm -rf $(VERSION)
+	@rm -rf $(HV_OBJDIR)
 
 .PHONY: distclean
 distclean:
-	rm -f $(DISTCLEAN_OBJS)
-	rm -f $(VERSION)
-	rm -rf $(HV_OBJDIR)
-	rm -f tags TAGS cscope.files cscope.in.out cscope.out cscope.po.out GTAGS GPATH GRTAGS GSYMS
+	@rm -f $(DISTCLEAN_OBJS)
+	@rm -f $(VERSION)
+	@rm -rf $(HV_OBJDIR)
+	@rm -f tags TAGS cscope.files cscope.in.out cscope.out cscope.po.out GTAGS GPATH GRTAGS GSYMS
 
 PHONY: (VERSION)
 $(VERSION): $(HV_CONFIG_H)

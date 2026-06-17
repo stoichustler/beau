@@ -29,6 +29,37 @@
  * Sync pulls completed LR state back into software. Flush pushes pending
  * software state into available LRs. This keeps the common scheduler free to
  * switch vCPUs without losing in-flight virtual interrupt state.
+ *
+ * Linux SMP boot depends on a precise edge-SGI lifecycle. A representative
+ * failure was VM2 reaching the PL011 console and then stalling with CPU0 in
+ * smp_call_function_many_cond(), waiting for CPU2 to unlock a synchronous CSD
+ * queued by kick_all_cpus_sync(). dumpstat showed that vCPU requests had been
+ * consumed, SGI1 had been targeted and flushed into a list register, and the
+ * SGI was no longer pending/active in the saved vGIC state; however the Linux
+ * CSD flags stayed locked. Symbolication of the CSD function identified the
+ * work item as do_nothing(), so the missing event was not a timer callback but
+ * the normal IPI_CALL_FUNC handler running on the target CPU.
+ *
+ * The target CPUs were stopped around cpu_do_idle(): WFI had returned, but the
+ * saved guest PSTATE still had IRQs masked because Linux enters WFI with local
+ * interrupts disabled and later calls local_irq_enable() in the idle loop. The
+ * virtual SGI may therefore wake the CPU before EL1 is ready to acknowledge and
+ * dispatch a normal IRQ. If EL2 observes a pending-only edge LR disappear and
+ * clears the software pending bit without EOI evidence, Linux loses the SGI
+ * before local_irq_enable() can take it; the CSD remains locked and the boot CPU
+ * spins forever. For this reason software-backed edge IRQs, especially SGIs,
+ * request EOI maintenance even from pending-only state and are kept pending
+ * until an explicit LR EOI/deactivation path proves that the guest completed
+ * the interrupt.
+ *
+ * The Linux virtual timer has a related post-boot diagnostic signature: EL2 can
+ * show an expired, host-masked CNTV source and a pending-only timer LR while
+ * Linux reports that RCU timer wakeups did not happen. Do not solve this by
+ * marking pending-only timer LRs for EOI maintenance: Linux can EOI such an LR
+ * before the timer line has been lowered, causing EL2 to resample the still-high
+ * CNTV source and immediately rebuild the same LR in a maintenance storm. Timer
+ * repair must instead keep the CNTV line model and host mask in sync when EL2
+ * already owns an in-flight timer LR.
  */
 #define BIT32(n)			(1U << (n))
 
@@ -509,11 +540,12 @@ static uint64_t make_lr_state(const struct arm64_vgic_irq *desc, bool pending, b
 	if (desc->hw) {
 		lr |= ((uint64_t)desc->pirq << ICH_LR_PINTID_SHIFT);
 		lr |= ICH_LR_HW;
-	} else if (active) {
+	} else if (active || !desc->level) {
 		/*
-		 * Software-backed virtual IRQs need EOI maintenance only after the
-		 * guest has accepted them. Pending-only LRs have no active lifecycle
-		 * to complete, and marking them for EOI can create maintenance storms.
+		 * Software edge IRQs must report completion even when they start as
+		 * pending-only LRs. Linux can wake from WFI with PSTATE.I still set;
+		 * the SGI must remain pending until EL1 actually acknowledges and EOIs
+		 * it after local_irq_enable().
 		 */
 		lr |= ICH_LR_EOI;
 	}
@@ -814,7 +846,9 @@ static void vgicv3_complete_eoi_lrs(struct acrn_vcpu *vcpu, uint64_t eoi_lrs,
 		desc = vgic_irq_desc(vcpu, virq);
 		if (desc != NULL) {
 			bool lr_pending = ((state & ICH_LR_STATE_PENDING) != 0U);
-			bool keep_pending = lr_pending || (desc->level && desc->pending);
+			bool lr_active = ((state & ICH_LR_STATE_ACTIVE) != 0U);
+			bool keep_pending = desc->level ?
+				(lr_pending || desc->pending) : (lr_pending && lr_active);
 
 			/*
 			 * The virtual timer is level-triggered by CNTV, not by the
@@ -1147,6 +1181,51 @@ void arm64_vgicv3_reset_vcpu(struct acrn_vcpu *vcpu)
 	arm64_vgicv3_init_vcpu(vcpu);
 }
 
+static void vgicv3_clear_vcpu_boot_irqs(struct acrn_vcpu *vcpu)
+{
+	struct arm64_vgicv3 *vgic = &vcpu->vm->arch_vm.vgic;
+	uint32_t virq;
+
+	/*
+	 * CPU_ON is a vCPU reset boundary. Clear private interrupt delivery state
+	 * so a secondary CPU does not enter Linux with stale SGI/PPI/LPI state,
+	 * while preserving distributor configuration and any shared SPI state.
+	 */
+	for (virq = 0U; virq < ARM64_VGIC_LOCAL_IRQ_NUM; virq++) {
+		struct arm64_vgic_irq *desc = &vgic->irq[vcpu->vcpu_id][virq];
+
+		vgic_set_pending(vgic, vcpu->vcpu_id, desc, false);
+		desc->active = false;
+	}
+	for (virq = 0U; vgic->its_enabled && (virq < ARM64_VGIC_LPI_NUM); virq++) {
+		struct arm64_vgic_irq *desc = &vgic->lpi[vcpu->vcpu_id][virq];
+
+		vgic_set_pending(vgic, vcpu->vcpu_id, desc, false);
+		desc->active = false;
+	}
+}
+
+void arm64_vgicv3_reset_vcpu_boot_state(struct acrn_vcpu *vcpu)
+{
+	struct arm64_vgicv3 *vgic;
+	uint64_t flags;
+
+	if ((vcpu == NULL) || (vcpu->vm == NULL)) {
+		return;
+	}
+
+	arm64_vgicv3_cancel_vtimer_backup(vcpu);
+	arm64_vgicv3_reset_vcpu(vcpu);
+	vgic = &vcpu->vm->arch_vm.vgic;
+	if (!vgic->initialized || (vcpu->vcpu_id >= ARM64_VGIC_MAX_VCPUS)) {
+		return;
+	}
+
+	spinlock_irqsave_obtain(&vgic->lock, &flags);
+	vgicv3_clear_vcpu_boot_irqs(vcpu);
+	spinlock_irqrestore_release(&vgic->lock, flags);
+}
+
 void arm64_vgicv3_load_vcpu(struct acrn_vcpu *vcpu)
 {
 	struct arm64_vgicv3_vcpu_ctx *ctx = &vcpu->arch.vgic;
@@ -1220,29 +1299,6 @@ static bool vgicv3_complete_timer_lr(struct acrn_vcpu *vcpu,
 		UINT32_MAX, UINT64_MAX, false, false);
 
 	return true;
-}
-
-static bool vgicv3_drop_timer_pending_lr(struct acrn_vcpu *vcpu,
-	const struct arm64_vgic_irq *desc, uint32_t lr_idx, uint32_t state)
-{
-	bool pending_only = ((state & ICH_LR_STATE_PENDING) != 0U) &&
-		((state & ICH_LR_STATE_ACTIVE) == 0U);
-
-	/*
-	 * If WFI observes a pending-only timer LR after the software queue and
-	 * active state are both empty, the LR is stale cached delivery state. Keep
-	 * the model single-sourced by CNTV: drop the LR and re-enable the host PPI
-	 * so an expired deadline is injected through the normal timer path.
-	 */
-	if (pending_only && !desc->pending && !desc->active && vgicv3_active_priority_empty() &&
-		vcpu->arch.gctx.cntv_el2_masked) {
-		(void)vgic_sample_current_vtimer(vcpu);
-		remove_lr(vcpu, lr_idx);
-		vgic_timer_set_host_mask(vcpu, false);
-		return true;
-	}
-
-	return false;
 }
 
 static bool vgicv3_requeue_lost_masked_timer(struct acrn_vcpu *vcpu)
@@ -1398,8 +1454,20 @@ static void vgicv3_sync_vcpu(struct acrn_vcpu *vcpu, bool is_current)
 		desc = vgic_irq_desc(vcpu, virq);
 		if (desc != NULL) {
 			bool queued_level = desc->level && desc->pending;
+			bool old_pending = ((lr_state(old_lr) & ICH_LR_STATE_PENDING) != 0U);
+			bool eoi_reported = (idx < BITS_PER_LONG) &&
+				((eoi_lrs & (1UL << idx)) != 0UL);
 
-			if (!queued_level) {
+			if (queued_level) {
+				/* Keep the level source queued for the next flush pass. */
+			} else if (!desc->level && old_pending && !eoi_reported) {
+				/*
+				 * A pending edge LR can wake an idle guest before EL1 has
+				 * re-enabled IRQs and acknowledged the SGI. If it disappears
+				 * without EOI evidence, treat the edge as not yet consumed.
+				 */
+				vgic_set_pending(&vcpu->vm->arch_vm.vgic, vcpu->vcpu_id, desc, true);
+			} else {
 				vgic_set_pending(&vcpu->vm->arch_vm.vgic, vcpu->vcpu_id, desc, false);
 			}
 			desc->active = false;
@@ -1423,13 +1491,13 @@ static void vgicv3_sync_vcpu(struct acrn_vcpu *vcpu, bool is_current)
 
 			if (!desc->level && lr_active && !lr_pending) {
 				/*
-				 * SGIs are edge-triggered and have no backing level to sample.
-				 * Once readback shows an active-only SGI, the guest has already
-				 * accepted the edge; clear it so later IPIs are not blocked by
-				 * stale active state.
+				 * Software edge IRQs remain active until an EOI maintenance
+				 * event proves that the guest completed the interrupt. Clearing
+				 * active-only SGIs here can lose an IPI that woke Linux from
+				 * idle before local_irq_enable() ran the handler.
 				 */
-				desc->active = false;
-				remove_lr(vcpu, idx);
+				desc->active = true;
+				idx++;
 				continue;
 			}
 			if (loaded && desc->level && (virq == vcpu->arch.gctx.timer_virq) &&
@@ -1513,10 +1581,6 @@ void arm64_vgicv3_complete_wfi_irqs(struct acrn_vcpu *vcpu)
 			if (!removed) {
 				idx++;
 			}
-			continue;
-		}
-		if ((desc != NULL) && desc->level && (virq == vcpu->arch.gctx.timer_virq) &&
-			vgicv3_drop_timer_pending_lr(vcpu, desc, idx, state)) {
 			continue;
 		}
 		idx++;
@@ -1920,6 +1984,80 @@ static void vgic_record_sgi(struct acrn_vcpu *source_vcpu, uint64_t value,
 	last->tsc = cpu_ticks();
 }
 
+static void vgic_sgi_masks(const struct acrn_vcpu *vcpu, uint16_t *enabled,
+	uint16_t *pending, uint16_t *active)
+{
+	const struct arm64_vgicv3 *vgic = &vcpu->vm->arch_vm.vgic;
+	uint32_t intid;
+
+	*enabled = 0U;
+	*pending = 0U;
+	*active = 0U;
+
+	for (intid = 0U; intid < ARM64_VGIC_SGI_NUM; intid++) {
+		const struct arm64_vgic_irq *desc = &vgic->irq[vcpu->vcpu_id][intid];
+		uint16_t bit = (uint16_t)BIT32(intid);
+
+		if (desc->enabled) {
+			*enabled |= bit;
+		}
+		if (desc->pending) {
+			*pending |= bit;
+		}
+		if (desc->active) {
+			*active |= bit;
+		}
+	}
+}
+
+static void vgic_record_sgi_target(struct acrn_vcpu *source_vcpu,
+	struct acrn_vcpu *target_vcpu, uint64_t value, uint32_t intid, int32_t status)
+{
+	struct arm64_vcpu_last_sgi_target *last = &target_vcpu->arch.debug.last_sgi_target;
+	const struct arm64_vgic_irq *desc = vgic_irq_desc(target_vcpu, intid);
+	bool target_current = vgicv3_vcpu_is_loaded(target_vcpu);
+	uint16_t enabled;
+	uint16_t pending;
+	uint16_t active;
+
+	/*
+	 * Remote target state can only be sampled from the saved vGIC context.
+	 * Live ICH_* registers are read only when the target vCPU is the current
+	 * guest on this pCPU; otherwise they would describe the source vCPU.
+	 */
+	vgic_sgi_masks(target_vcpu, &enabled, &pending, &active);
+	last->source_value = value;
+	last->intid = intid;
+	last->status = status;
+	last->source_vcpu_id = source_vcpu->vcpu_id;
+	last->target_vcpu_id = target_vcpu->vcpu_id;
+	last->local_enabled = enabled;
+	last->local_pending = pending;
+	last->local_active = active;
+	last->used_lrs = target_vcpu->arch.vgic.used_lrs;
+	last->request_pending = vcpu_has_pending_request(target_vcpu);
+	last->target_running = (target_vcpu->state == VCPU_RUNNING);
+	last->target_current = target_current;
+	last->desc_enabled = (desc != NULL) && desc->enabled;
+	last->desc_pending = (desc != NULL) && desc->pending;
+	last->desc_active = (desc != NULL) && desc->active;
+	last->desc_level = (desc != NULL) && desc->level;
+	if (target_current) {
+		last->hcr = read_ich_hcr_el2();
+		last->misr = read_ich_misr_el2();
+		last->lr0 = read_ich_lr_el2(0U);
+		last->lr1 = read_ich_lr_el2(1U);
+	} else {
+		last->hcr = target_vcpu->arch.vgic.hcr;
+		last->misr = 0UL;
+		last->lr0 = (target_vcpu->arch.vgic.used_lrs > 0U) ?
+			target_vcpu->arch.vgic.lr[0U] : 0UL;
+		last->lr1 = (target_vcpu->arch.vgic.used_lrs > 1U) ?
+			target_vcpu->arch.vgic.lr[1U] : 0UL;
+	}
+	last->tsc = cpu_ticks();
+}
+
 int32_t arm64_vgicv3_handle_sgi1r(struct acrn_vcpu *vcpu, uint64_t value)
 {
 	uint32_t intid = (uint32_t)((value >> ICC_SGI1R_INTID_SHIFT) & ICC_SGI1R_INTID_MASK);
@@ -1941,6 +2079,7 @@ int32_t arm64_vgicv3_handle_sgi1r(struct acrn_vcpu *vcpu, uint64_t value)
 		if ((target_vcpu->state != VCPU_OFFLINE) &&
 			((target_mask & BIT32(target_vcpu->vcpu_id)) != 0U)) {
 			last_status = arm64_vgicv3_inject_irq_to(vcpu, target_vcpu, intid, false);
+			vgic_record_sgi_target(vcpu, target_vcpu, value, intid, last_status);
 			if (last_status == 0) {
 				delivered_mask |= BIT32(target_vcpu->vcpu_id);
 			}

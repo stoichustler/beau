@@ -270,18 +270,16 @@ int32_t arch_reset_vm(struct acrn_vm *vm)
 void arch_vm_prepare_bsp(struct acrn_vcpu *vcpu)
 {
 	struct acrn_vm *vm = vcpu->vm;
+	uint64_t entry = (uint64_t)vm->sw.kernel_info.kernel_entry_addr;
 
 	/*
 	 * GUEST_FLAG_NO_FW only means no external ACPI/FDT module is required.
 	 * Static QEMU raw images still consume the synthetic vFDT boot ABI.
 	 */
-	vcpu_set_elr(vcpu, (uint64_t)vm->sw.kernel_info.kernel_entry_addr);
 #if CONFIG_STATIC_VFDT
-	vcpu->arch.regs.x0 = (uint64_t)vm->sw.fdt_info.load_addr;
-	vcpu->arch.regs.x1 = 0UL;
-	vcpu->arch.regs.x2 = 0UL;
-	vcpu->arch.regs.x3 = 0UL;
+	arm64_prepare_linux_vcpu_context(vcpu, entry, (uint64_t)vm->sw.fdt_info.load_addr);
 #else
+	arm64_prepare_linux_vcpu_context(vcpu, entry, vcpu_get_vmpidr(vcpu));
 	vcpu->arch.regs.x0 = vcpu_get_vmpidr(vcpu);
 	vcpu->arch.regs.x1 = (uint64_t)vm->sw.fdt_info.load_addr;
 #endif

@@ -18,6 +18,13 @@ confirmation before implementation. Document and discuss common-code timer,
 scheduler, vCPU, VM, IRQ, or memory-management optimizations first, then wait for
 approval before editing shared core code.
 
+Changes to `sdk/images/linux/sima-linux.dts` require explicit human confirmation
+before implementation. Treat VM2 Linux bootargs, CPU topology, device nodes,
+memory ranges, interrupt/timer properties, and debug-only boot parameters in
+this DTS as user-controlled. Discuss the intended DTS change first; after
+approval, update the generated `sdk/images/linux/sima-linux.dtb` only as part of
+that approved DTS change.
+
 ## ARM64 Development Status
 
 The ARM64 bring-up currently targets QEMU `virt` for automated validation and
@@ -353,17 +360,26 @@ The following have been verified on QEMU with `-smp 8`:
 
 ## VM2 Linux Debug Snapshot
 
-Status as of 2026-06-16:
+Status as of 2026-06-17:
 
+- Current baseline: VM2 Linux reaches the PL011 login prompt, accepts
+  `root` / `root`, enters the root shell, and passes the automated root identity
+  check in the standard QEMU regression. This is the baseline to preserve before
+  making any further VM2 timer or vGIC change.
+- The baseline was restored after reverting the stale pending-only timer LR
+  drop experiment. That experiment made boot and VM console handoff visibly
+  slower and must not be treated as the starting point for future work.
+- `dumpstat` no longer includes the Linux CSD wait probe or any direct
+  `call_single_data_t` parser. Keep `dumpstat` focused on generic vCPU state,
+  EL1 state, timer/vGIC state, vtimer trace, SGI target state, local IRQ state,
+  and raw guest/host stacks.
 - Development hygiene: avoid broad, low-signal local `rg` searches over large
   source trees. Prefer known relevant files in this repository and targeted
-  reads from explicitly named external sources, such as `~/linux-7.1`.
-- Latest cleaned validation:
-  `SIMA_TOOLCHAINS=$HOME/sima-cc/bin ./scripts/regress.py --timeout 180
-  --log out/qemu_out/regress-gate-cleaned.log`.
-  VM0 Zephyr and VM1 LK passed the regression gate (`dumpstat 0`, `vsh 0`,
-  and `vsh 1`). VM2 Linux still timed out waiting for `clou login:`.
-- Keep VM2 Linux at 4 vCPUs; no single-vCPU fallback validation is being used.
+  reads from explicitly named external references, such as the Linux 7.1 source
+  tree used for VM2 symbolication.
+- Keep VM2 Linux at 4 vCPUs for validation. `maxcpus=1` or `maxcpu=1` can hide
+  the SMP/timer symptom and may be useful as a temporary comparison point, but
+  it is not a fix for the 4-vCPU VM2 Linux path.
 - Keep Linux assets under `sdk/images/linux`; the active Linux DT source is
   `sdk/images/linux/sima-linux.dts`. This DTS must only be changed by an
   explicit manual edit. Do not let build scripts, regression scripts, or helper
@@ -373,45 +389,14 @@ Status as of 2026-06-16:
   `dtc -I dts -O dtb -o sdk/images/linux/sima-linux.dtb sdk/images/linux/sima-linux.dts`.
   The SIMA image must then be rebuilt because `sima-linux.dtb` is included by
   `arch/arm64/platform/qemu/platform_image.S`.
-- `sdk/images/linux/sima-linux.dts` currently keeps the base Linux bootargs and
-  adds an `initcall_blacklist` for ACPI/Xen/TPM/ATA initcalls that are not
-  useful on the SIMA virtual platform. Do not re-add earlier diagnostic
-  bootargs such as `nokaslr`, `cma=0`, or
-  `clocksource.arm_arch_timer.evtstrm=0`.
 - Timer DT interrupt IDs remain unchanged. The virtual timer still uses
   PPI/INTID 27 from `<1 13 4>`; current evidence does not require changing
   PPI27.
 - WFI/WFE trapping is kept disabled by default. Reference checks:
-  `~/nebula/bloc/raan/croc` traps WFE as yield and WFI as block, while
-  `~/nebula/bloc/raan/anoa` traps WFE as yield and uses an IRQ-wait path for
-  WFI with a yield threshold plus timeout. In SIMA QEMU, enabling TWI/TWE makes
-  VM0/VM1/VM2 noticeably slower, so the default relies on hardware/vGIC wakeup.
-- A clean QEMU run after restoring native WFI/WFE reached the VM2 PL011 console
-  handoff at about Linux timestamp `1.83s`; trapped WFI/WFE variants pushed the
-  same area to about `31s` or later. VM0/VM1 still pass the regression gate.
-  VM2 Linux login timeout remains a separate post-console issue.
-- vtimer experiment `regress-vtimer-backup.log`: arming a software backup timer
-  on every vCPU unload, modeled after anoa's full generic-timer context path,
-  regressed VM2 heavily (`smp: Brought up` around `46.42s`, PL011 console around
-  `52.19s`). Do not keep this in the QEMU 3OS path.
-- vtimer experiment `regress-vtimer-line-resample.log`: resampling the live CNTV
-  line when a timer LR is completed keeps early boot speed acceptable (`smp:
-  Brought up` around `0.29s`, PL011 console around `2.07s`) and VM0/VM1 pass,
-  but VM2 still times out before login. The timeout snapshot still shows an
-  expired vtimer deadline on VM2/vCPU0 with host PPI27 enabled, so the next
-  timer work should focus on active/pending LR lifecycle rather than WFI/WFE or
-  broad backup timers.
-- Linux CPU1/CPU2/CPU3 reach the guest secondary entry path. The remaining VM2
-  instability is now after secondary CPU bring-up and before a stable root
-  shell.
-- The useful VM2 progress marker is that `vsh 2` can show Linux reaching
-  `clou login:`. In the same run, delayed input allowed BusyBox login to time
-  out and Linux later printed RCU stall diagnostics, so this is not yet a
-  completed `root` / `root` / `help` validation.
-- The latest cleaned run does not reach PL011 login before timeout. Earlier
-  runs reached `console [ttyAMA0] enabled`; in both cases the VM2 diagnostic
-  state remains centered on virtual timer PPI27 rather than a proven PL011
-  interrupt issue.
+  the croc reference traps WFE as yield and WFI as block, while the anoa
+  reference traps WFE as yield and uses an IRQ-wait path for WFI with a yield
+  threshold plus timeout. In SIMA QEMU, enabling TWI/TWE makes VM0/VM1/VM2
+  noticeably slower, so the default relies on hardware/vGIC wakeup.
 - The latest ITS validation keeps VM0/VM1 free of ITS/LPI exposure and exposes
   vITS only to VM2 Linux. This avoids perturbing RTOS guests while still
   allowing Linux to exercise GICv3 ITS and LPI table setup.
@@ -419,76 +404,82 @@ Status as of 2026-06-16:
   hypervisor restricted LPI range of 8192 IDs, but the in-hypervisor descriptor
   model stores only a compact 256-LPI active window. Mappings outside that
   active window are ignored until a dynamic LPI descriptor allocator is added.
-- `dumpstat 2` in the bad state repeatedly points at the virtual timer
-  lifecycle on CPU0:
-  - LR0 can remain as pending-only virtual INTID 27, for example
-    `0x508000000000001b`.
-  - The software vGIC descriptor for virq 27 can be `pending:no active:no
-    level:yes`.
-  - In the latest cleaned run, host PPI27 is enabled/unmasked and CNTV is still
-    expired on vCPU0, but the pending-only LR remains.
-  - Linux reports `Possible timer handling issue on cpu=0 timer-softirq=0`
-    when the stall reproduces.
-- `dumpstat` should remain focused on vCPU/timer/vGIC state and must not grow
-  vPL011 statistics again.
 
-Experiments already tried:
+### VM2 Linux RCU Stall Signature
+
+- The remaining issue is post-login SMP runtime stability, not pre-login boot:
+  VM2 can reach the root console, then later Linux may print RCU stall messages.
+- The representative Linux log says
+  `rcu_preempt kthread timer wakeup didn't happen`,
+  `Possible timer handling issue on cpu=0 timer-softirq=0`, and shows target
+  CPUs idling around `default_idle_call()`.
+- The useful hypervisor-side evidence is centered on the virtual timer/vGIC
+  path for VM2/vCPU0:
+  - virtual timer PPI/INTID 27,
+  - CNTV deadline/control state and `cntv_el2_masked`,
+  - LR state for virtual INTID 27,
+  - software vGIC descriptor state for virq 27,
+  - host PPI27 enabled/pending/active state,
+  - recent vtimer trace events and recent timer sysreg/inject records.
+- A stale pending-only timer LR, such as `0x508000000000001b`, combined with an
+  empty software descriptor is a diagnostic clue. It should not be repaired by
+  blindly forcing EOI maintenance or by dropping the LR from broad sync paths.
+- If the vtimer trace shows no timer sysreg writes while Linux is handling the
+  interrupt, assume the CPU model may be allowing direct EL1 CNTV access despite
+  the intended trap configuration. In that case, fixes must sample live CNTV
+  state at real EL2 boundaries instead of relying only on `handle_timer_sysreg()`.
+
+### RCU Stall Repair Strategy
+
+1. Preserve the fast root-console baseline first. Before any VM2 RCU experiment,
+   run the standard QEMU regression and require VM0 Zephyr, VM1 LK, and VM2
+   Linux root identity checks to pass.
+2. Do not change `core/` scheduler/timer/vCPU code or
+   `sdk/images/linux/sima-linux.dts` as part of the first RCU fix attempt.
+   Those areas require explicit human confirmation and are not the current
+   narrow failure boundary.
+3. Reproduce the stall from VM2 root shell with the 4-vCPU configuration. On
+   the first RCU warning, return to the SIMA shell and capture `dumpstat 2`,
+   `vcpus`, `schedstat`, and `irqstat`.
+4. In `dumpstat 2`, compare vCPU0 against the other VM2 vCPUs: live CNTV_CTL,
+   CNTV_CVAL, CNTVCT, `cntv_el2_masked`, timer virq, LR0/LR1, vGIC descriptor
+   pending/active/level bits, AP registers, and host PPI27 state.
+5. Fix in the ARM64 vGIC/vtimer lifecycle, not in Linux bootargs. The likely
+   repair boundary is a narrow synchronization point where EL2 already knows a
+   timer LR completed or a loaded vCPU is leaving/entering guest execution.
+6. Keep guest-visible CNTV state and EL2 host-mask state separate. EL2 may need
+   to throttle host PPI delivery, but Linux's timer handler must still be able
+   to observe an architecturally expired CNTV timer when it handles PPI27.
+7. If a fix samples live CNTV, do it only at bounded points such as vCPU
+   switch-in/out, timer IRQ injection, maintenance/EOI handling, or explicit
+   guest exits. Avoid background backup timers or always-on polling in the QEMU
+   3OS path unless a later design proves they are required.
+8. Treat the RCU fix as complete only when VM2 reaches `root` / `root`, remains
+   responsive long enough to cover the earlier RCU stall window, emits no
+   `timer-softirq=0` RCU warning, and VM0/VM1 still pass the regression gate.
+
+### Experiments Not To Repeat
 
 - Marking pending-only software timer LRs with EOI caused maintenance storms
-  and broke AP bring-up. Do not repeat that change.
-- Keeping host PPI27 globally unmasked in the virtual timer handler or poll
-  path regressed secondary CPU bring-up. Do not repeat that broad change.
-- Dropping stale pending-only timer LRs from the general vGIC sync path also
-  regressed secondary CPU bring-up.
-- Removing the WFI `DAIF.I` guard did not solve the post-console stall and was
-  reverted.
-- Re-arming the host virtual-timer PPI only from the WFI timer-LR cleanup path
-  is conservative and allowed VM2 to reach `clou login:` in one run, but it did
-  not eliminate the CPU0 timer-softirq stall.
-- Extending that re-arm into the general vGIC sync path regressed AP bring-up
-  and was reverted.
+  and broke AP bring-up.
+- Replacing EL2's live CNTV mask with broad host PPI27 enable/disable logic
+  slowed or stalled RTOS console validation and was reverted.
+- Dropping stale pending-only timer LRs from WFI or broad vGIC sync paths made
+  startup visibly slower and was reverted.
 - Rewriting the WFI pending-only timer LR as Active+Pending made forward
   progress worse and was reverted.
-- Removing WFI/WFE traps and letting hardware wake guest idle, as in the
-  reference `prot` path, keeps VM0/VM1 passing and speeds VM2 boot, but does
-  not fix the VM2 login timeout by itself.
-- Re-enabling WFI/WFE traps with WFI as a pure yield slowed VM2 badly and could
-  leave host PPI27 masked. Reworking WFI to block, based on the croc/anoa
-  direction, still slowed the QEMU 3OS scenario and affected VM0/VM1 as well.
+- Re-enabling WFI/WFE traps slowed the QEMU 3OS scenario and affected VM0/VM1.
   Keep HCR_EL2.TWI/TWE clear unless a specific diagnostic run requires trapped
   idle instructions.
 - Porting anoa's full switch-out backup timer model directly to SIMA caused a
-  large VM2 slowdown. The useful part to keep is local deadline resampling at
-  LR completion/EOI boundaries; avoid arming a backup timer on every vCPU
-  unload until the GICv3 LR lifecycle is simpler.
+  large VM2 slowdown. Do not arm a backup timer on every vCPU unload in the
+  current QEMU 3OS path.
 - Expanding the vITS software model to a static 8192-LPI descriptor array
   caused QEMU to stop producing useful shell output for more than 60 seconds.
   Keep the compact active-window model unless dynamic allocation is added.
-- Removing the host PPI27 mask from the timer poll path kept VM0/VM1 passing
-  but did not fix VM2 and raised host virtual-timer IRQ counts, so it was
-  reverted.
 - Expanding the generated QEMU vFDT PL011 clocks to include both `uartclk` and
-  `apb_pclk` kept VM0/VM1 passing but did not affect VM2. VM2 uses the embedded
-  `sdk/images/linux/sima-linux.dtb`, whose DTS already has both clocks, so the
-  generated-vFDT experiment was reverted.
-- The current in-tree timer completion change removes a completed active timer
-  LR and re-enables the host PPI so the hardware level source can create a
-  fresh virtual timer injection instead of preserving stale active state. It
-  keeps VM0/VM1 passing, but VM2 still times out before stable login.
-
-Recommended resume point:
-
-1. Before any VM2 experiment, run the full regression and require VM0/VM1 to
-   pass (`dumpstat 0`, `vsh 0`, `vsh 1`).
-2. Start from the current `arch/arm64/guest/vgicv3.c` timer completion change
-   with WFI/WFE trapping disabled in HCR_EL2.
-3. Confirm VM2 CPU1/CPU2/CPU3 still boot.
-4. Switch with `vsh 2`, wait for `clou login:`, then immediately input
-   `root`, password `root`, and run `help`.
-5. If Linux stalls before login or emits RCU timer warnings, return with Ctrl-D
-   and capture `dumpstat 2`, `vcpus`, `schedstat`, and `irqstat`.
-6. Treat a VM2 fix as complete only after `root` / `root` / `help` succeeds
-   without RCU timer-softirq warnings while VM0 and VM1 remain responsive.
+  `apb_pclk` did not affect VM2. VM2 uses the embedded
+  `sdk/images/linux/sima-linux.dtb`, whose DTS already has both clocks.
 
 ## Code Commenting Guidelines
 

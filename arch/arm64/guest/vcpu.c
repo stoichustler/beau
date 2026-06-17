@@ -29,10 +29,63 @@
  * them back when the thread is switched out.
  */
 #define SPSR_EL2_MODE_EL1H	0x5UL
+#define ARM64_GUEST_SCTLR_EL1_INIT	0x00c50078UL
 
 void vcpu_set_elr(struct acrn_vcpu *vcpu, uint64_t val)
 {
 	vcpu->arch.regs.elr = val;
+}
+
+static void arm64_init_guest_regs(struct cpu_regs *regs, uint64_t entry, uint64_t x0)
+{
+	uint64_t host_tpidr = regs->host_tpidr;
+	uint64_t exc_sp = regs->exc_sp;
+
+	/*
+	 * Keep the EL2-private return fields intact; guest-visible GPRs and
+	 * exception state are reset to the Linux boot ABI before EL1 entry.
+	 */
+	(void)memset(regs, 0U, sizeof(*regs));
+	regs->host_tpidr = host_tpidr;
+	regs->exc_sp = exc_sp;
+	regs->x0 = x0;
+	regs->elr = entry;
+	regs->spsr = SPSR_EL2_MODE_EL1H | DAIF_ALL;
+}
+
+static void arm64_init_guest_control_context(struct acrn_vcpu *vcpu)
+{
+	struct arm64_vcpu_guest_ctx *gctx = &vcpu->arch.gctx;
+
+	/*
+	 * Linux enters with EL1 MMU/data cache disabled and with architected EL1
+	 * state known, not inherited from the pCPU that happened to create the
+	 * vCPU. Values here mirror the reset-style context used by established ARM
+	 * hypervisors while keeping SIMA's stage-2 and timer virtualization state.
+	 */
+	(void)memset(gctx, 0U, sizeof(*gctx));
+	gctx->vttbr_el2 = hva2hpa(vcpu->vm->root_stg2ptp);
+	gctx->vtcr_el2 = VTCR_EL2_VALUE;
+	gctx->hcr_el2 = HCR_VM | HCR_RW | HCR_IMO | HCR_FMO | HCR_AMO | HCR_TSC;
+	gctx->cntvoff_el2 = (uint64_t)vcpu->vm->arch_vm.time_delta;
+	gctx->timer_virq = ARM64_GIC_PPI_VIRTUAL_TIMER;
+	gctx->sctlr_el1 = ARM64_GUEST_SCTLR_EL1_INIT;
+}
+
+void arm64_prepare_linux_vcpu_context(struct acrn_vcpu *vcpu, uint64_t entry, uint64_t x0)
+{
+	if ((vcpu == NULL) || (vcpu->vm == NULL)) {
+		return;
+	}
+
+	arm64_vgicv3_cancel_vtimer_backup(vcpu);
+	vcpu->pending_req = 0UL;
+	vcpu->arch.irqs_pending = 0UL;
+	vcpu->arch.irqs_pending_mask = 0UL;
+	vcpu->arch.trap.esr = EXCEPTION_INVALID;
+	arm64_init_guest_regs(&vcpu->arch.regs, entry, x0);
+	arm64_init_guest_control_context(vcpu);
+	arm64_vgicv3_reset_vcpu_boot_state(vcpu);
 }
 
 static uint32_t arm64_vcpu_timer_shadow_ctl(const struct arm64_vcpu_guest_ctx *gctx,
@@ -367,8 +420,6 @@ int32_t arm64_process_vcpu_requests(struct acrn_vcpu *vcpu)
 
 int32_t arch_init_vcpu(struct acrn_vcpu *vcpu)
 {
-	struct arm64_vcpu_guest_ctx *gctx = &vcpu->arch.gctx;
-
 	/*
 	 * Each vCPU points at the VM's stage-2 root and starts with EL1 AArch64
 	 * enabled. HCR routes guest physical interrupts to EL2 and traps PSCI.
@@ -377,38 +428,6 @@ int32_t arch_init_vcpu(struct acrn_vcpu *vcpu)
 	 * scenario and is only kept as a handler for future diagnostic modes.
 	 */
 	reset_vcpu(vcpu);
-	gctx->vttbr_el2 = hva2hpa(vcpu->vm->root_stg2ptp);
-	gctx->vtcr_el2 = VTCR_EL2_VALUE;
-	gctx->hcr_el2 = HCR_VM | HCR_RW | HCR_IMO | HCR_FMO | HCR_AMO | HCR_TSC;
-	gctx->cntvoff_el2 = (uint64_t)vcpu->vm->arch_vm.time_delta;
-	gctx->cntp_cval_el0 = 0UL;
-	gctx->cntv_cval_el0 = 0UL;
-	gctx->cntp_ctl_el0 = 0U;
-	gctx->cntv_ctl_el0 = 0U;
-	gctx->timer_virq = ARM64_GIC_PPI_VIRTUAL_TIMER;
-	gctx->cntv_el2_masked = false;
-	gctx->cntkctl_el1 = read_cntkctl_el1();
-	gctx->sctlr_el1 = read_sctlr_el1();
-	gctx->ttbr0_el1 = read_ttbr0_el1();
-	gctx->ttbr1_el1 = read_ttbr1_el1();
-	gctx->tcr_el1 = read_tcr_el1();
-	gctx->mair_el1 = read_mair_el1();
-	gctx->amair_el1 = read_amair_el1();
-	gctx->vbar_el1 = read_vbar_el1();
-	gctx->contextidr_el1 = read_contextidr_el1();
-	gctx->cpacr_el1 = read_cpacr_el1();
-	gctx->tpidr_el0 = read_tpidr_el0();
-	gctx->tpidrro_el0 = read_tpidrro_el0();
-	gctx->tpidr_el1 = read_tpidr_el1();
-	gctx->sp_el0 = read_sp_el0();
-	gctx->elr_el1 = read_elr_el1();
-	gctx->spsr_el1 = read_spsr_el1();
-	gctx->esr_el1 = read_esr_el1();
-	gctx->far_el1 = read_far_el1();
-	gctx->afsr0_el1 = read_afsr0_el1();
-	gctx->afsr1_el1 = read_afsr1_el1();
-	gctx->par_el1 = read_par_el1();
-	arm64_vgicv3_init_vcpu(vcpu);
 	return 0;
 }
 
@@ -452,9 +471,7 @@ void arch_reset_vcpu(struct acrn_vcpu *vcpu)
 {
 	arm64_vgicv3_cancel_vtimer_backup(vcpu);
 	memset(&vcpu->arch, 0, sizeof(vcpu->arch));
-	vcpu->arch.trap.esr = EXCEPTION_INVALID;
-	vcpu->arch.regs.spsr = SPSR_EL2_MODE_EL1H | DAIF_ALL;
-	arm64_vgicv3_reset_vcpu(vcpu);
+	arm64_prepare_linux_vcpu_context(vcpu, 0UL, 0UL);
 }
 
 void arch_context_switch_out(struct thread_object *prev)

@@ -30,6 +30,23 @@
  * software state into available LRs. This keeps the common scheduler free to
  * switch vCPUs without losing in-flight virtual interrupt state.
  *
+ * Interrupt virtualization flow:
+ *
+ *   guest ICC/GIC access or host event
+ *        -> vGIC descriptor + pending bitmap
+ *        -> vgicv3_sync_vcpu() reads completed LR state
+ *        -> vgicv3_flush_vcpu() writes deliverable IRQs into LRs
+ *        -> guest IAR/EOIR consumes the virtual interrupt
+ *        -> maintenance IRQ or next sync reconciles active/pending state
+ *
+ * vtimer virtualization flow:
+ *
+ *   guest CNTP/CNTV sysreg write or live CNTV PPI
+ *        -> vCPU timer shadow + live CNTV sample
+ *        -> virtual timer IRQ descriptor and pending bitmap
+ *        -> LR delivery to EL1
+ *        -> guest reprogram/EOI lowers or completes the level source
+ *
  * Linux SMP boot depends on a precise edge-SGI lifecycle. A representative
  * failure was VM2 reaching the PL011 console and then stalling with CPU0 in
  * smp_call_function_many_cond(), waiting for CPU2 to unlock a synchronous CSD
@@ -311,6 +328,13 @@ static void vgic_set_pending(struct arm64_vgicv3 *vgic, uint16_t vcpu_id,
 
 static uint32_t vgic_vtimer_guest_ctl(const struct arm64_vcpu_guest_ctx *gctx);
 
+/*
+ * Host masking hands the live CNTV output to the software vGIC while a timer
+ * LR owns guest delivery:
+ *
+ *   CNTV expires -> mask host PPI -> inject virtual timer LR
+ *   guest EOI/reprogram -> resample CNTV -> unmask when the line is safe
+ */
 static void vgic_timer_set_host_mask(struct acrn_vcpu *vcpu, bool masked)
 {
 	struct arm64_vcpu_guest_ctx *gctx;
@@ -449,6 +473,13 @@ static void vgicv3_disarm_vtimer_backup(struct acrn_vcpu *vcpu)
 	}
 }
 
+/*
+ * Offline/shared-pCPU timer flow:
+ *
+ *   vCPU switched out with an enabled future deadline
+ *        -> backup host timer is armed at the guest deadline
+ *        -> backup handler injects the same guest timer PPI if still offline
+ */
 static void vgicv3_arm_vtimer_backup(struct acrn_vcpu *vcpu)
 {
 	struct arm64_vcpu_guest_ctx *gctx;
@@ -1411,6 +1442,9 @@ static void vgicv3_sync_vcpu(struct acrn_vcpu *vcpu, bool is_current)
 	 * into the software IRQ descriptors. It is called before changing virtual
 	 * IRQ state and from maintenance IRQs when hardware reports LR pressure or
 	 * completion.
+	 *
+	 *   ICH_LR<n>/EISR/EOIcount -> descriptor pending/active bits
+	 *        -> compact saved LRs -> next flush can refill free slots
 	 */
 	old_used_lrs = ctx->used_lrs;
 	(void)memcpy(old_lrs, ctx->lr, sizeof(old_lrs));
@@ -1673,6 +1707,9 @@ static void vgicv3_flush_vcpu(struct acrn_vcpu *vcpu, bool is_current)
 	 * enabled so the guest exit path can retry after the guest consumes entries.
 	 * The pending bitmap avoids scanning the full virtual INTID space when the
 	 * common case has only a few pending interrupts.
+	 *
+	 *   pending bitmap -> deliverability check -> LR slot
+	 *        -> clear software pending bit or set UIE when LRs are full
 	 */
 	ctx->hcr &= ~ICH_HCR_UIE;
 
@@ -1808,6 +1845,9 @@ static int32_t vgic_inject_locked(struct arm64_vgicv3 *vgic, struct acrn_vcpu *t
 		 * get overwritten by stale software state. The event request wakes
 		 * a blocked vCPU and makes the scheduler re-enter pre-guest
 		 * request processing.
+		 *
+		 *   event source -> descriptor.pending -> optional live flush
+		 *        -> vCPU event request -> scheduler/guest return path
 		 */
 		vgicv3_sync_vcpu(target_vcpu, false);
 		desc->level = level;
@@ -2071,6 +2111,9 @@ int32_t arm64_vgicv3_handle_sgi1r(struct acrn_vcpu *vcpu, uint64_t value)
 	 * Guest SGI sends are trapped from ICC_SGI1R_EL1 and translated into
 	 * per-target virtual IRQ injections. The current affinity model matches
 	 * the QEMU vMPIDR layout where vCPU IDs occupy affinity level 0.
+	 *
+	 *   ICC_SGI1R_EL1 trap -> target mask -> per-target inject
+	 *        -> kick running target vCPU
 	 */
 	foreach_vcpu(idx, vcpu->vm, target_vcpu) {
 		if (sgi1r_targets_vcpu(value, vcpu->vcpu_id, target_vcpu->vcpu_id)) {
@@ -2105,6 +2148,9 @@ void arm64_vgicv3_maintenance_irq_handler(__unused uint32_t irq, __unused void *
 		 * Maintenance IRQs are the hardware notification that LR state
 		 * needs service. Read back guest-consumed state, then refill LRs
 		 * from software pending state while still on the running pCPU.
+		 *
+		 *   maintenance PPI -> CPU interface snapshot
+		 *        -> sync LRs -> flush pending backlog
 		 */
 		spinlock_irqsave_obtain(&vgic->lock, &flags);
 		vgicv3_record_cpuif_snapshot(vcpu, &vcpu->arch.debug.last_vgic_maintenance,
@@ -2140,6 +2186,9 @@ void arm64_vgicv3_update_current_vtimer(struct acrn_vcpu *vcpu)
 	 * Sync before changing the timer pending bit so the software descriptor
 	 * sees the hardware Active state and flush preserves Active+Pending
 	 * instead of overwriting it with a stale Pending-only LR.
+	 *
+	 *   sysreg write or return path -> sample CNTV -> sync old LR
+	 *        -> update timer descriptor -> flush deliverable timer state
 	 */
 	vgicv3_sync_vcpu(vcpu, true);
 	vgicv3_sync_timer_line_locked(vcpu, true, level);
@@ -2181,6 +2230,9 @@ void arm64_vgicv3_virtual_timer_irq_handler(__unused uint32_t irq, __unused void
 	 * into the guest-visible PPI recorded in timer_virq. That lets CNTP-based
 	 * RTOS guests keep their expected interrupt number while the host still
 	 * reserves CNTP for scheduler ticks.
+	 *
+	 *   physical PPI27 -> sample live CNTV -> mask host line
+	 *        -> inject guest timer PPI through vGIC
 	 */
 	if (vcpu != NULL) {
 		uint32_t virq = vcpu->arch.gctx.timer_virq;
@@ -2240,6 +2292,9 @@ void arm64_vgicv3_poll_current_vtimer(struct acrn_vcpu *vcpu)
 	 * QEMU can leave the Linux BSP with CNTV enabled and an expired deadline
 	 * while PPI27 is not asserted. On guest exits, check only the loaded vCPU
 	 * and translate that expired CNTV state into the same guest PPI.
+	 *
+	 *   guest exit -> read live CNTV -> if expired and not masked
+	 *        -> inject as if the physical virtual-timer PPI fired
 	 */
 	if (vcpu->arch.gctx.cntv_el2_masked) {
 		(void)vgicv3_requeue_lost_masked_timer(vcpu);
@@ -3919,6 +3974,9 @@ int32_t arm64_vgicv3_mmio_handler(struct io_request *io_req, void *handler_priva
 	 * MMIO can race with host-side virtual IRQ injection. The vGIC lock makes
 	 * guest register programming, LR readback, and software IRQ descriptors a
 	 * single coherent state transition.
+	 *
+	 *   data abort -> io_request -> vGIC lock -> sync
+	 *        -> emulate GICD/GICR/GITS -> flush if LR state changed
 	 */
 	if ((vcpu != NULL) && (vgic != NULL)) {
 		struct arm64_vgicv3_vcpu_ctx *ctx = &vcpu->arch.vgic;

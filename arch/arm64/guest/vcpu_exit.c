@@ -29,6 +29,14 @@
  * CPU state into a temporary struct cpu_regs frame on the vCPU thread stack;
  * this file converts that architectural exit state into common ACRN concepts
  * such as MMIO requests, PSCI CPU control, and virtual interrupt delivery.
+ *
+ * Interrupt and timer return paths:
+ *
+ *   EL1 ICC_* sysreg trap -> handle_sysreg() -> arm64_vgicv3_*()
+ *   EL1 CNT* sysreg trap -> handle_timer_sysreg() -> update_current_vtimer()
+ *   EL1 WFI/WFE trap     -> poll/update vtimer -> pending check -> maybe yield
+ *   physical IRQ at EL2  -> dispatch IRQ/softirq -> maybe schedule
+ *                         -> poll/update vtimer -> process vCPU requests
  */
 #define HPFAR_EL2_FIPA_MASK	0xfffffffff0UL
 #define FAR_EL2_PAGE_MASK	0xfffUL
@@ -513,6 +521,10 @@ static void guest_timer_write_live_ctl(struct arm64_vcpu_guest_ctx *gctx)
  * that use CNTP still receive the physical-timer PPI, while guests using CNTV
  * receive the virtual-timer PPI. This keeps the host deadline independent from
  * guest timer programming while preserving the guest-visible interrupt ABI.
+ *
+ *   guest CNT* read/write -> update timer shadow/live CNTV
+ *        -> caller samples CNTV via update_current_vtimer()
+ *        -> vGIC presents or removes the guest timer line
  */
 static int32_t handle_timer_sysreg(struct acrn_vcpu *vcpu, uint64_t sysreg, bool read, uint64_t *reg)
 {
@@ -664,6 +676,10 @@ static int32_t handle_sysreg(struct acrn_vcpu *vcpu)
 	 * ICC_SGI1R_EL1 is trapped so guest SGI sends become vGIC software state
 	 * updates. Other system registers are left unsupported until a guest needs
 	 * them; failing closed makes missing virtualization explicit.
+	 *
+	 *   ICC_SGI* -> SGI injection
+	 *   ICC control -> vCPU interface shadow/control
+	 *   CNT* -> timer shadow + vtimer update
 	 */
 	if (((iss & ESR_SYSREG_DIR_READ) == 0UL) &&
 		((sysreg == SYSREG_ICC_SGI1R_EL1) || (sysreg == SYSREG_ICC_SGI0R_EL1) ||
@@ -734,6 +750,9 @@ static int32_t handle_wfx(struct acrn_vcpu *vcpu)
 	 * WFI observes pending interrupts at the instruction boundary. Sample the
 	 * loaded CNTV state before deciding whether this trapped WFI can yield;
 	 * otherwise an expired guest timer could be missed until another exit.
+	 *
+	 *   sample vtimer -> update vGIC timer line -> complete stale active LRs
+	 *        -> check LR/software pending state -> yield only if no event
 	 */
 	arm64_vgicv3_poll_current_vtimer(vcpu);
 	arm64_vgicv3_update_current_vtimer(vcpu);
@@ -836,6 +855,9 @@ void dispatch_vcpu_trap(struct cpu_regs *regs)
 	 * Synchronous guest exits are handled on the current vCPU thread. The saved
 	 * frame may be modified by emulation, scheduling, or request processing
 	 * before being restored to the assembly return path.
+	 *
+	 *   emulate exit -> optional schedule -> poll/update vtimer
+	 *        -> process vCPU requests -> restore frame
 	 */
 	save_exit_regs(vcpu, regs);
 
@@ -883,6 +905,9 @@ void dispatch_vcpu_irq(struct cpu_regs *regs)
 	 * shared pCPU can immediately re-enter EL1 and starve the peer vCPU that is
 	 * waiting for its time slice. Virtual interrupt state is resynced after the
 	 * possible context switch and before returning to EL1.
+	 *
+	 *   physical IRQ -> IRQ handler/softirq -> optional schedule
+	 *        -> poll/update vtimer -> process vCPU requests -> ERET
 	 */
 	save_exit_regs(vcpu, regs);
 	record_vcpu_exit(vcpu, ARM64_VCPU_DEBUG_EXIT_IRQ, 0);

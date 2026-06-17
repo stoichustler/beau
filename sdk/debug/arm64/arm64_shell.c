@@ -21,7 +21,6 @@
 #include <debug/symbol.h>
 #include <asm/mmu.h>
 #include <asm/platform.h>
-#include <asm/sysreg.h>
 #include <asm/guest/vcpu.h>
 #include "../shell_priv.h"
 
@@ -34,10 +33,6 @@
 #define SHELL_CMD_REBOOT		"reboot"
 #define SHELL_CMD_REBOOT_PARAM		NULL
 #define SHELL_CMD_REBOOT_HELP		"trigger a system reboot (immediately)"
-#define SHELL_CMD_CRASH			"crash"
-#define SHELL_CMD_CRASH_PARAM		NULL
-#define SHELL_CMD_CRASH_HELP		"trigger an arm64 host exception and dump the exception stack"
-#define SHELL_CRASH_FAULT_ADDR		0x80000000UL
 #define DUMPSTAT_SMP_CALL_TIMEOUT_US	1000U
 #define DUMPSTAT_STACK_DEPTH		16U
 #define DUMPSTAT_REG_KEY_FMT		"%5s:0x%016lx"
@@ -54,7 +49,6 @@
 static int32_t shell_list_mem(__unused int32_t argc, __unused char **argv);
 static int32_t shell_dumpstat(int32_t argc, char **argv);
 static int32_t shell_reboot(__unused int32_t argc, __unused char **argv);
-static int32_t shell_crash(int32_t argc, __unused char **argv);
 
 struct shell_cmd arch_shell_cmds[] = {
 	{
@@ -74,12 +68,6 @@ struct shell_cmd arch_shell_cmds[] = {
 		.cmd_param	= SHELL_CMD_REBOOT_PARAM,
 		.help_str	= SHELL_CMD_REBOOT_HELP,
 		.fcn		= shell_reboot,
-	},
-	{
-		.str		= SHELL_CMD_CRASH,
-		.cmd_param	= SHELL_CMD_CRASH_PARAM,
-		.help_str	= SHELL_CMD_CRASH_HELP,
-		.fcn		= shell_crash,
 	},
 };
 uint32_t arch_shell_cmds_sz = ARRAY_SIZE(arch_shell_cmds);
@@ -1103,19 +1091,4 @@ static int32_t shell_reboot(__unused int32_t argc, __unused char **argv)
 {
 	reset_host(false);
 	return 0;
-}
-
-static int32_t shell_crash(int32_t argc, __unused char **argv)
-{
-	volatile uint64_t *fault_addr = (volatile uint64_t *)SHELL_CRASH_FAULT_ADDR;
-	uint64_t value;
-
-	if (argc != 1) {
-		return -EINVAL;
-	}
-
-	shell_puts("triggering arm64 host data abort...\r\n");
-	value = *fault_addr;
-
-	return (int32_t)value;
 }

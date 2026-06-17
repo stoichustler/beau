@@ -13,6 +13,11 @@ them, validate with the documented `scripts/kick.py` and `scripts/regress.py`
 flows when appropriate, and follow the English design-comment rules for ARM64
 virtualization code.
 
+After any SIMA code modification, Codex must ask whether manual validation is
+needed before closing the task. The final response must clearly separate
+automated validation that Codex already ran from manual validation that still
+requires human confirmation.
+
 Optimizations or behavior changes under `core/` require explicit human
 confirmation before implementation. Document and discuss common-code timer,
 scheduler, vCPU, VM, IRQ, or memory-management optimizations first, then wait for
@@ -170,8 +175,6 @@ boot logs settle to show the `console:\>` prompt.
 - PSCI virtualization for guest `CPU_ON`, `CPU_OFF`, `AFFINITY_INFO`,
   `SYSTEM_OFF`, and `SYSTEM_RESET`.
 - SIMA shell `reboot` command wired to host PSCI system reset.
-- SIMA shell `crash` command for intentionally triggering an ARM64 host data
-  abort, printing the exception stack, and cold rebooting automatically.
 - PSCI-based host secondary CPU bring-up with `MAX_PCPU_NUM=8`.
 - VM0 and VM1 vCPUs share pCPU3 through the existing `sched_iorr` scheduler.
   VM0 uses ordinary-core pCPU0, pCPU2, pCPU3, and pCPU4; VM1 uses mixed pCPU3,
@@ -201,6 +204,8 @@ boot logs settle to show the `console:\>` prompt.
   - `irqstat`
   - `dumpstat [vm id]`
   - `vsh <vm id>`
+- Press Tab in the SIMA shell to display `registered commands`; `help` is not
+  registered as a SIMA console command.
 - `vsh <vm id>` switches the serial console to a VM vPL011/vUART console.
   Ctrl-D switches back to the SIMA shell.
 - `schedstat` prints the scheduler algorithm and one physical-CPU row with
@@ -326,9 +331,6 @@ The following have been verified on QEMU with `-smp 8`:
 - VM console output bypasses vUART TX FIFO forwarding for the selected `vsh`
   VM console.
 - Ctrl-D returns from VM console mode to `console:\>`.
-- The `crash` command prints an ARM64 exception stack with `[cut here]` and
-  `[end here]` markers, including a symbolized host call trace, then cold
-  reboots SIMA automatically.
 - Five repeated QEMU cold boots reached VM0/VM1/VM2 guest entry without
   `[cut here]` or `unexpected arm64 trap`, covering the prior `SP_EL2`/`SPSel`
   boot race.

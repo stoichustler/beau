@@ -55,10 +55,6 @@ struct shell {
 };
 
 /* Shell Command list with parameters and help description */
-#define SHELL_CMD_HELP			"help"
-#define SHELL_CMD_HELP_PARAM		NULL
-#define SHELL_CMD_HELP_HELP		"display information about supported hypervisor shell commands"
-
 #define SHELL_CMD_VERSION		"version"
 #define SHELL_CMD_VERSION_PARAM		NULL
 #define SHELL_CMD_VERSION_HELP		"display the hv version information"

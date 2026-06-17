@@ -23,6 +23,7 @@
 
 #define SHELL_PROMPT_STR	"console:\\> "
 #define SHELL_ASCII_BS		'\b'
+#define SHELL_ASCII_TAB		'\t'
 #define SHELL_ASCII_DEL		0x7fU
 
 char shell_log_buf[SHELL_LOG_BUF_SIZE];
@@ -33,7 +34,7 @@ extern uint32_t arch_shell_cmds_sz;
  * input lines total).
  */
 
-static int32_t shell_cmd_help(__unused int32_t argc, __unused char **argv);
+static void shell_print_registered_commands(void);
 static int32_t shell_version(__unused int32_t argc, __unused char **argv);
 static int32_t shell_loglevel(int32_t argc, char **argv);
 static int32_t shell_dump_host_mem(int32_t argc, char **argv);
@@ -45,12 +46,6 @@ static int32_t shell_to_vm_console(int32_t argc, char **argv);
 static const char *thread_state_str(enum thread_object_state state);
 
 static struct shell_cmd shell_cmds[] = {
-	{
-		.str		= SHELL_CMD_HELP,
-		.cmd_param	= SHELL_CMD_HELP_PARAM,
-		.help_str	= SHELL_CMD_HELP_HELP,
-		.fcn		= shell_cmd_help,
-	},
 	{
 		.str		= SHELL_CMD_VERSION,
 		.cmd_param	= SHELL_CMD_VERSION_PARAM,
@@ -282,6 +277,15 @@ static void set_cursor_pos(uint32_t left_offset)
 	}
 }
 
+static void shell_restore_input_line(void)
+{
+	shell_puts(SHELL_PROMPT_STR);
+	if (p_shell->input_line_len > 0U) {
+		shell_puts(p_shell->buffered_line[p_shell->input_line_active]);
+		set_cursor_pos(p_shell->input_line_len - p_shell->cursor_offset);
+	}
+}
+
 static void handle_delete_key(void)
 {
 	if (p_shell->cursor_offset < p_shell->input_line_len) {
@@ -479,6 +483,11 @@ static bool shell_input_line(void)
 	case SHELL_ASCII_BS:
 	case SHELL_ASCII_DEL:
 		handle_backspace_key();
+		break;
+
+	case SHELL_ASCII_TAB:
+		shell_print_registered_commands();
+		shell_restore_input_line();
 		break;
 
 	/* Carriage-return */
@@ -697,70 +706,51 @@ void shell_start(void)
 	shell_started = true;
 }
 
-#define SHELL_ROWS	30
 #define MAX_OUTPUT_LEN  80
-static int32_t shell_cmd_help(__unused int32_t argc, __unused char **argv)
+static void shell_print_registered_commands(void)
 {
 	struct shell_cmd *p_cmd = NULL;
 
 	char str[MAX_STR_SIZE];
-	char* help_str;
 	uint32_t cmd_cnt = p_shell->cmd_count + p_shell->arch_cmd_count;
 	/* Print title */
-	shell_puts("\r\nregistered commands:\r\n\r\n");
+	shell_puts("\r\n\r\n────────── [SIMA commands] ──────────\r\n\r\n");
 
 	/* Proceed based on the number of registered commands. */
 	if (cmd_cnt == 0U) {
 		/* No registered commands */
 		shell_puts("none\r\n");
 	} else {
-		int32_t i = 0;
 		uint32_t j;
 
 		for (j = 0U; j < cmd_cnt; j++) {
+			const char *cmd_param;
+			const char *help_str;
+
 			if (j < p_shell->cmd_count) {
 				p_cmd = &p_shell->cmds[j];
 			} else {
 				p_cmd = &p_shell->arch_cmds[j - p_shell->cmd_count];
 			}
 
-			/* Check if we've filled the screen with info */
-			/* i + 1 used to avoid 0%SHELL_ROWS=0 */
-			if (((i + 1) % SHELL_ROWS) == 0) {
-				/* Pause before we continue on to the next
-				 * page.
-				 */
-
-				/* Print message to the user. */
-				shell_puts("hit any key to continue");
-
-				/* Wait for a character from user (NOT USED) */
-				(void)shell_getc();
-
-				/* Print a new line after the key is hit. */
-				shell_puts("\r\n");
-			}
-
-			i++;
-			if (p_cmd->cmd_param == NULL)
-				p_cmd->cmd_param = " ";
+			cmd_param = (p_cmd->cmd_param == NULL) ? " " : p_cmd->cmd_param;
 			(void)memset(str, ' ', sizeof(str));
 			/* Output the command & parameter string */
 			snprintf(str, MAX_OUTPUT_LEN, " %-15s%-64s",
-					p_cmd->str, p_cmd->cmd_param);
+					p_cmd->str, cmd_param);
 			shell_puts(str);
 			shell_puts("\r\n");
 
-			help_str = p_cmd->help_str;
-			while (strnlen_s(help_str, MAX_OUTPUT_LEN > 0)) {
+			help_str = (p_cmd->help_str == NULL) ? "" : p_cmd->help_str;
+			while (strnlen_s(help_str, MAX_OUTPUT_LEN) > 0U) {
 				(void)memset(str, ' ', sizeof(str));
 				if (strnlen_s(help_str, MAX_OUTPUT_LEN) > 65) {
-					snprintf(str, MAX_OUTPUT_LEN, "               %-s", help_str);
+					snprintf(str, MAX_OUTPUT_LEN, "         %-s", help_str);
 					shell_puts(str);
 					shell_puts("\r\n");
 					help_str = help_str + 65;
 				} else {
-					snprintf(str, MAX_OUTPUT_LEN, "               %-s", help_str);
+					snprintf(str, MAX_OUTPUT_LEN, "         %-s", help_str);
 					shell_puts(str);
 					shell_puts("\r\n");
 					break;
@@ -770,8 +760,6 @@ static int32_t shell_cmd_help(__unused int32_t argc, __unused char **argv)
 	}
 
 	shell_puts("\r\n");
-
-	return 0;
 }
 
 static int32_t shell_version(__unused int32_t argc, __unused char **argv)

@@ -155,6 +155,30 @@ static void restore_exit_regs(struct cpu_regs *regs, const struct acrn_vcpu *vcp
 		&vcpu->arch.regs, sizeof(vcpu->arch.regs));
 }
 
+static void refresh_current_vtimer(struct acrn_vcpu *vcpu)
+{
+	arm64_vgicv3_poll_current_vtimer(vcpu);
+	arm64_vgicv3_update_current_vtimer(vcpu);
+}
+
+static bool vcpu_has_pending_guest_irq(struct acrn_vcpu *vcpu)
+{
+	return arm64_vgicv3_has_pending_irq(vcpu);
+}
+
+static struct acrn_vcpu *schedule_without_guest_return_work(uint16_t pcpu_id,
+	struct acrn_vcpu *vcpu)
+{
+	refresh_current_vtimer(vcpu);
+	if (need_reschedule(pcpu_id) && !vcpu_has_pending_guest_irq(vcpu)) {
+		schedule();
+		vcpu = get_exit_vcpu(pcpu_id);
+		refresh_current_vtimer(vcpu);
+	}
+
+	return vcpu;
+}
+
 static void record_vcpu_exit(struct acrn_vcpu *vcpu, uint32_t source, int32_t status)
 {
 	struct arm64_vcpu_last_exit *last = &vcpu->arch.debug.last_exit;
@@ -760,7 +784,14 @@ static int32_t handle_wfx(struct acrn_vcpu *vcpu)
 	pending_irq = arm64_vgicv3_has_pending_irq(vcpu);
 	irq_masked = ((vcpu->arch.regs.spsr & DAIF_IRQ) != 0UL);
 	request_pending = vcpu_has_pending_request(vcpu);
-	should_yield = is_wfe || (!request_pending && (!pending_irq || irq_masked));
+	/*
+	 * WFI is allowed to complete on a pending interrupt even when EL1 still has
+	 * PSTATE.I set. Linux relies on that: idle returns from WFI with IRQs masked,
+	 * exits the idle accounting path, and only then executes local_irq_enable().
+	 * Yield only when no virtual event is visible; otherwise return to EL1 so it
+	 * can make forward progress to the unmask point.
+	 */
+	should_yield = is_wfe || (!request_pending && !pending_irq);
 	if (!is_wfe && vcpu->arch.vtimer_wfi_rescue) {
 		if (pending_irq && irq_masked) {
 			vcpu->arch.vtimer_lr_rescue = true;
@@ -811,10 +842,12 @@ static int32_t handle_wfx(struct acrn_vcpu *vcpu)
 	/*
 	 * This handler is non-default diagnostic plumbing because QEMU 3OS leaves
 	 * HCR_EL2.TWI/TWE clear. If a diagnostic mode enables the traps, keep the
-	 * behavior lightweight: WFE yields, and WFI yields only when no immediately
-	 * useful virtual event is visible. The timer rescue path uses TWI only to
-	 * trap the next WFI and rebuild a pending timer LR; after that the LR rescue
-	 * marker protects the pending-only LR until EL1 unmasks and EOIs the timer.
+	 * behavior lightweight: WFE yields, and WFI yields only when no virtual event
+	 * is visible. A masked pending IRQ still has to return to EL1 so Linux can run
+	 * out of the idle path and unmask interrupts. The timer rescue path uses TWI
+	 * only to trap the next WFI and rebuild a pending timer LR; after that the LR
+	 * rescue marker protects the pending-only LR until EL1 unmasks and EOIs the
+	 * timer.
 	 */
 	if (should_yield) {
 		yield_current();
@@ -894,13 +927,12 @@ void dispatch_vcpu_trap(struct cpu_regs *regs)
 
 	local_irq_disable();
 
-	if (need_reschedule(pcpu_id)) {
-		schedule();
-		vcpu = get_exit_vcpu(pcpu_id);
-	}
-
-	arm64_vgicv3_poll_current_vtimer(vcpu);
-	arm64_vgicv3_update_current_vtimer(vcpu);
+	/*
+	 * Do not preempt a vCPU that already has visible guest work. Linux can be
+	 * sitting just after WFI with PSTATE.I still set; it needs a short return to
+	 * EL1 to leave the idle path and unmask the pending virtual IRQ.
+	 */
+	vcpu = schedule_without_guest_return_work(pcpu_id, vcpu);
 	ret = arm64_process_vcpu_requests(vcpu);
 	if (ret < 0) {
 		pr_fatal("failed to process arm64 vcpu requests");
@@ -939,13 +971,12 @@ void dispatch_vcpu_irq(struct cpu_regs *regs)
 	local_irq_disable();
 	do_softirq_no_irqenable();
 
-	if (need_reschedule(pcpu_id)) {
-		schedule();
-		vcpu = get_exit_vcpu(pcpu_id);
-	}
-
-	arm64_vgicv3_poll_current_vtimer(vcpu);
-	arm64_vgicv3_update_current_vtimer(vcpu);
+	/*
+	 * A host tick often arrives while the guest is in the WFI return window.
+	 * If a virtual IRQ is already materialized, let the guest retire enough
+	 * instructions to unmask and handle it before honoring host reschedule.
+	 */
+	vcpu = schedule_without_guest_return_work(pcpu_id, vcpu);
 	ret = arm64_process_vcpu_requests(vcpu);
 	if (ret < 0) {
 		pr_fatal("failed to process arm64 vcpu requests");

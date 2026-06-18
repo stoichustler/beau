@@ -1,10 +1,10 @@
-# SIMA ARM64 Reference
+# BEAU ARM64 Reference
 
 ## Repository Map
 
 - `Makefile`: static ARM64 platform config path when `ARCH=arm64
   PLATFORM=qemu` or `ARCH=arm64 PLATFORM=rk356x`.
-- `scripts/kick.py`: QEMU launcher for `out/qemu_out/sima.debug.out`.
+- `scripts/kick.py`: QEMU launcher for `out/qemu_out/beau.debug.out`.
 - `scripts/regress.py`: boot regression harness for QEMU shell and VM console checks.
 - `arch/arm64/platform/qemu`: QEMU board/scenario, static VM config, embedded RTOS images, platform helpers.
 - `arch/arm64/platform/rk356x`: rk356x hardware-platform constants, static VM
@@ -12,14 +12,14 @@
 - `arch/arm64/guest`: stage-2 VM setup, vCPU entry/exit, vGICv3, vPL011, hypercall handling.
 - `core`: common VM, vCPU, scheduler, timer, hypercall, and MMIO request logic.
 - `sdk/boot`: boot module discovery and kernel loaders.
-- `sdk/debug`: SIMA shell, console, debug commands, vsh, dumpstat, irqstat.
+- `sdk/debug`: BEAU shell, console, debug commands, vsh, dumpstat, irqstat.
 - `sdk/sdk.md`: current implementation status and verified behavior.
 
 ## Build And Run
 
 Build:
 
-Set `SIMA_TOOLCHAINS` to the bare-metal toolchain bin directory, then run:
+Set `BEAU_TOOLCHAINS` to the bare-metal toolchain bin directory, then run:
 
 ```bash
 ./scripts/kick.py --build --dry-run
@@ -29,7 +29,7 @@ Set `SIMA_TOOLCHAINS` to the bare-metal toolchain bin directory, then run:
 Build rk356x hardware image:
 
 ```bash
-PATH=${SIMA_TOOLCHAINS}:$PATH \
+PATH=${BEAU_TOOLCHAINS}:$PATH \
 make ARCH=arm64 PLATFORM=rk356x CROSS_COMPILE=aarch64-none-elf- -j$(nproc)
 ```
 
@@ -38,14 +38,14 @@ Default platform build outputs are `out/qemu_out` for QEMU and
 
 rk356x hardware validation is manual for now: flash the generated image using
 the board workflow and inspect serial logs for EL2 boot, MMU setup, GIC init,
-the SIMA shell prompt, and VM launch logs.
+the BEAU shell prompt, and VM launch logs.
 
 When editing `sdk/debug/*`, stale archive dependencies may hide source changes.
 Force a debug rebuild before validation:
 
 ```bash
-rm -f out/qemu_out/modules/libdebug.a out/qemu_out/sima.out out/qemu_out/sima.debug.out out/qemu_out/sima.debug.bin
-PATH=${SIMA_TOOLCHAINS}:$PATH \
+rm -f out/qemu_out/modules/libdebug.a out/qemu_out/beau.out out/qemu_out/beau.debug.out out/qemu_out/beau.debug.bin
+PATH=${BEAU_TOOLCHAINS}:$PATH \
 make ARCH=arm64 PLATFORM=qemu CROSS_COMPILE=aarch64-none-elf- -j$(nproc)
 ```
 
@@ -82,9 +82,9 @@ qemu-system-aarch64 \
   -m 1024M \
   -nographic \
   -serial mon:stdio \
-  -kernel out/qemu_out/sima.debug.out \
-  -device loader,file=sdk/images/linux/Image,addr=0x70000000,force-raw=on \
-  -device loader,file=sdk/images/linux/Initrd,addr=0x74000000,force-raw=on
+  -kernel out/qemu_out/beau.debug.out \
+  -device loader,file=sdk/image/linux/Image,addr=0x70000000,force-raw=on \
+  -device loader,file=sdk/image/linux/Initrd,addr=0x74000000,force-raw=on
 ```
 
 ## Current VM Layout
@@ -92,23 +92,23 @@ qemu-system-aarch64 \
 - pCPU0-pCPU5 model ordinary cores.
 - pCPU6-pCPU7 model performance cores.
 - VM0 is the Zephyr service VM:
-  - Image: `sdk/images/zephyr.bin`
+  - Image: `sdk/image/zephyr.bin`
   - Load/entry: `0x42000000`
   - RAM identity window: `0x42000000-0x48000000`
   - pCPUs: 0, 2, 3, 4
 - VM1 is the LK pre-launched VM:
-  - Image: `sdk/images/lk.bin`
+  - Image: `sdk/image/lk.bin`
   - Load/entry: `0x40100000`
   - RAM identity window: `0x40000000-0x42000000`
   - pCPUs: 3, 5, 6, 7
 - VM2 is the Linux pre-launched VM:
-  - Kernel image: `sdk/images/linux/Image`
+  - Kernel image: `sdk/image/linux/Image`
   - QEMU kernel stage address: `0x70000000`
   - Kernel load/entry: `0x48080000`
-  - Initrd image: `sdk/images/linux/Initrd`
+  - Initrd image: `sdk/image/linux/Initrd`
   - QEMU initrd stage address: `0x74000000`
   - Initrd load: `0x4c000000`
-  - DTB: `sdk/images/linux/sima-linux.dtb`
+  - DTB: `sdk/image/linux/beau-linux.dtb`
   - RAM identity window: `0x48000000-0x50000000`
   - pCPUs: 1, 4, 6, 7
   - Boot console: `console=ttyAMA0 earlycon=pl011,0x09000000`
@@ -117,11 +117,11 @@ qemu-system-aarch64 \
   Each VM's vCPU0/BSP pCPU is private: VM0 uses pCPU2, VM1 uses pCPU5,
   and VM2 uses pCPU1.
 
-QEMU and rk356x both keep guest images under `sdk/images`. LK and Zephyr are
-embedded RTOS raw images. Linux `Image`, `Initrd`, `sima-linux.dts`, and
-`sima-linux.dtb` live under `sdk/images/linux`; `Image` and `Initrd` are staged
-by a loader and copied by SIMA, while `sima-linux.dtb` is embedded as the
-Linux-on-SIMA DTB module.
+QEMU and rk356x both keep guest images under `sdk/image`. LK and Zephyr are
+embedded RTOS raw images. Linux `Image`, `Initrd`, `beau-linux.dts`, and
+`beau-linux.dtb` live under `sdk/image/linux`; `Image` and `Initrd` are staged
+by a loader and copied by BEAU, while `beau-linux.dtb` is embedded as the
+Linux-on-BEAU DTB module.
 
 The first `create_vcpu()` call creates vCPU0/BSP. The ARM64 creation order keeps
 the service VM BSP away from pCPU0 and keeps every VM BSP on a pCPU that is not
@@ -136,7 +136,7 @@ used by another VM.
 - Zephyr and LK are RTOS raw images and use `GUEST_FLAG_NO_FW`. This skips
   external ACPI/FDT boot modules; ARM64 can still pass a synthetic static vFDT.
 - VM2 Linux clears `GUEST_FLAG_NO_FW`, uses loader/module delivery for `Image`
-  and `Initrd`, and receives the embedded `sima-linux.dtb`.
+  and `Initrd`, and receives the embedded `beau-linux.dtb`.
 - VM2 Linux keeps PL011 earlycon enabled so `vsh 2` can replay kernel logs even
   before the normal PL011 console driver is registered.
 - The host owns CNTP for scheduler ticks. Guest physical/virtual timer sysreg
@@ -147,7 +147,7 @@ used by another VM.
 
 ## Shell Validation
 
-Useful SIMA shell commands:
+Useful BEAU shell commands:
 
 - `vcpus`: VM/vCPU pCPU binding and state.
 - `schedstat`: scheduler algorithm plus per-pCPU timer, switch, reschedule,
@@ -157,7 +157,7 @@ Useful SIMA shell commands:
   and saved host stack for the vCPU thread on its bound pCPU. Guest stack
   entries remain raw addresses because guest symbols are not embedded. Host
   return addresses resolve through the symbol table embedded in
-  `sima.debug.out`; offline vCPUs skip stack output.
+  `beau.debug.out`; offline vCPUs skip stack output.
 - `irqstat`: interrupt names, active state, overflow state, and all-pCPU counts.
 - `vsh 0`: switch to Zephyr console, expect `zero ~>`.
 - `vsh 1`: switch to LK console, expect `beau ~>`.
@@ -184,7 +184,7 @@ For VM/scheduler/console changes, validate:
    logs.
 6. `vsh 1` reaches `beau ~>`.
 7. `vsh 2` reaches `clou login:` and logs in as `root` / `root`.
-8. Ctrl-D returns to SIMA shell.
+8. Ctrl-D returns to BEAU shell.
 9. No `[cut here]`, `unexpected arm64 trap`, or host unexpected IRQ appears.
 
 ## Commenting Rules

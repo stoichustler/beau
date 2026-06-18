@@ -61,7 +61,7 @@ static void arm64_init_guest_control_context(struct acrn_vcpu *vcpu)
 	 * Linux enters with EL1 MMU/data cache disabled and with architected EL1
 	 * state known, not inherited from the pCPU that happened to create the
 	 * vCPU. Values here mirror the reset-style context used by established ARM
-	 * hypervisors while keeping SIMA's stage-2 and timer virtualization state.
+	 * hypervisors while keeping BEAU's stage-2 and timer virtualization state.
 	 */
 	(void)memset(gctx, 0U, sizeof(*gctx));
 	gctx->vttbr_el2 = hva2hpa(vcpu->vm->root_stg2ptp);

@@ -1,34 +1,34 @@
 # Hardware Platform Porting Guide
 
 This guide describes how to add or maintain an ARM64 hardware platform in
-SIMA. It is written for non-Intel ARM64 platform work and assumes the target
+BEAU. It is written for non-Intel ARM64 platform work and assumes the target
 platform follows the current static bring-up model used by QEMU and rk356x.
 
 ## Scope
 
 - Add a platform under `arch/arm64/platform/<platform>`.
 - Keep architecture-neutral ARM64 virtualization code under `arch/arm64`.
-- Keep guest image inputs in `sdk/images`.
+- Keep guest image inputs in `sdk/image`.
 - Keep build outputs in `out/$(PLATFORM)_out`.
 - Validate behavior first on QEMU where possible, then on hardware by manual
   flashing and serial-log inspection.
 
 Do not document machine-local paths. Use repository-relative paths or
-environment variables such as `SIMA_TOOLCHAINS`.
+environment variables such as `BEAU_TOOLCHAINS`.
 
 ## Prerequisites
 
-Set `SIMA_TOOLCHAINS` to the bare-metal toolchain bin directory before any
+Set `BEAU_TOOLCHAINS` to the bare-metal toolchain bin directory before any
 build:
 
 ```bash
-test -n "${SIMA_TOOLCHAINS}" && test -d "${SIMA_TOOLCHAINS}"
+test -n "${BEAU_TOOLCHAINS}" && test -d "${BEAU_TOOLCHAINS}"
 ```
 
 Build commands should put the toolchain at the front of `PATH`:
 
 ```bash
-PATH=${SIMA_TOOLCHAINS}:$PATH \
+PATH=${BEAU_TOOLCHAINS}:$PATH \
 make ARCH=arm64 PLATFORM=<platform> CROSS_COMPILE=aarch64-none-elf- -j$(nproc)
 ```
 
@@ -80,22 +80,22 @@ MMIO or guest layout in common ARM64 files.
 LK and Zephyr stay as RTOS `.incbin` images:
 
 ```text
-sdk/images/lk.bin
-sdk/images/zephyr.bin
+sdk/image/lk.bin
+sdk/image/zephyr.bin
 ```
 
 VM2 Linux uses repository-local images staged by the platform launcher or board
-loader, then copied by SIMA:
+loader, then copied by BEAU:
 
 ```text
-sdk/images/linux/Image
-sdk/images/linux/Initrd
+sdk/image/linux/Image
+sdk/image/linux/Initrd
 ```
 
-The Linux-on-SIMA DTB remains a small embedded module:
+The Linux-on-BEAU DTB remains a small embedded module:
 
 ```text
-sdk/images/linux/sima-linux.dtb
+sdk/image/linux/beau-linux.dtb
 ```
 
 `platform_image.S` should use `.incbin` only for LK, Zephyr, and small DTB
@@ -155,9 +155,9 @@ out/<platform>_out/
 Expected debug artifacts include:
 
 ```text
-out/<platform>_out/sima.out
-out/<platform>_out/sima.debug.out
-out/<platform>_out/sima.debug.bin
+out/<platform>_out/beau.out
+out/<platform>_out/beau.debug.out
+out/<platform>_out/beau.debug.bin
 ```
 
 Do not design scripts or documentation around machine-local output locations.
@@ -167,7 +167,7 @@ Do not design scripts or documentation around machine-local output locations.
 Before hardware work, keep the QEMU baseline passing:
 
 ```bash
-PATH=${SIMA_TOOLCHAINS}:$PATH \
+PATH=${BEAU_TOOLCHAINS}:$PATH \
 make ARCH=arm64 PLATFORM=qemu CROSS_COMPILE=aarch64-none-elf- -j$(nproc)
 
 ./scripts/regress.py --no-build
@@ -175,7 +175,7 @@ make ARCH=arm64 PLATFORM=qemu CROSS_COMPILE=aarch64-none-elf- -j$(nproc)
 
 QEMU validation should cover:
 
-- SIMA shell prompt.
+- BEAU shell prompt.
 - `vcpus`, `schedstat`, `vmap`, `irqstat`, and `dumpstat`.
 - `vsh 0` reaching the Zephyr shell.
 - `vsh 1` reaching the LK shell.
@@ -186,21 +186,21 @@ QEMU validation should cover:
 ## Hardware Validation
 
 Hardware validation is manual for now. Use the board flashing workflow for the
-generated SIMA image and inspect serial logs.
+generated BEAU image and inspect serial logs.
 
 Minimum hardware checks:
 
-- EL2 entry reaches the SIMA banner.
+- EL2 entry reaches the BEAU banner.
 - Host stage-1 mappings are printed and MMU enablement succeeds.
 - GIC distributor and redistributor initialization succeeds on all pCPUs.
 - Host secondary pCPUs enter the running state.
-- The SIMA shell reaches `console:\>`.
+- The BEAU shell reaches `console:\>`.
 - Static VMs are created and started.
 - Guest stage-2 RAM maps match the platform VM configuration.
 - vPL011 output is visible through `vsh`.
 - Guest PSCI `CPU_ON` can bring up configured guest AP vCPUs.
 
-If hardware fails before the SIMA shell, compare the serial log against the
+If hardware fails before the BEAU shell, compare the serial log against the
 QEMU boot sequence and isolate the first missing milestone.
 
 ## rk356x Notes
@@ -215,7 +215,7 @@ arch/arm64/platform/rk356x/
 Build it with:
 
 ```bash
-PATH=${SIMA_TOOLCHAINS}:$PATH \
+PATH=${BEAU_TOOLCHAINS}:$PATH \
 make ARCH=arm64 PLATFORM=rk356x CROSS_COMPILE=aarch64-none-elf- -j$(nproc)
 ```
 
@@ -235,9 +235,9 @@ runner exists.
 - Add `PLATFORM=<platform>` source selection in `arch/arm64/Makefile`.
 - Keep headers and new ARM64 platform files marked as
   `Copyright (C) 2026 Hustler Lo.` with `SPDX-License-Identifier: BSD-3-Clause`.
-- Keep guest images under `sdk/images`.
+- Keep guest images under `sdk/image`.
 - Keep platform output under `out/$(PLATFORM)_out`.
-- Confirm `SIMA_TOOLCHAINS` before builds.
+- Confirm `BEAU_TOOLCHAINS` before builds.
 - Build QEMU and run regression before hardware validation.
 - Build the hardware platform target.
 - Flash manually and inspect serial logs.
@@ -248,7 +248,7 @@ runner exists.
 
 Common first checks:
 
-- Missing SIMA banner: inspect EL2 entry, stack setup, linker address, and image
+- Missing BEAU banner: inspect EL2 entry, stack setup, linker address, and image
   load address.
 - MMU fault before shell: inspect host stage-1 RAM/MMIO ranges and page-table
   attributes.

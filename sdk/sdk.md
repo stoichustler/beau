@@ -2,40 +2,51 @@
 
 When Codex works on this repository, it must read this file first and also
 apply the repository-local skill under `sdk/codex`. Use `sdk/codex/SKILL.md` as
-the active SIMA hypervisor development workflow, and read
+the active BEAU hypervisor development workflow, and read
 `sdk/codex/references/architecture.md` when architecture details, invariants,
 commands, or validation checklists are needed.
 
-Codex must keep changes focused on the existing SIMA ARM64/QEMU/rk356x design,
+Codex must keep changes focused on the existing BEAU ARM64/QEMU/rk356x design,
 preserve the documented static VM and image-loading assumptions unless an
 explicit task changes them, announce intended file or area edits before making
-them, validate with the documented `scripts/kick.py` and `scripts/regress.py`
-flows when appropriate, and follow the English design-comment rules for ARM64
-virtualization code.
+them, and follow the English design-comment rules for ARM64 virtualization
+code.
 
-After any SIMA code modification, Codex must ask whether manual validation is
-needed before closing the task. The final response must clearly separate
-automated validation that Codex already ran from manual validation that still
-requires human confirmation.
+BEAU development uses a human-run build and validation flow. Codex must not run
+BEAU builds, QEMU boots, hardware flashing, or `scripts/regress.py` unless the
+user explicitly asks for that specific run in the current task. By default,
+Codex should provide the exact build, launch, regression, and hardware
+validation commands for the user to run manually, and should treat their logs or
+reported results as the source of validation truth. This repository-level rule
+overrides any build or regression guidance in `sdk/codex/SKILL.md` or
+`sdk/codex/references/architecture.md`.
+
+Codex may run lightweight local checks that do not build or boot BEAU, such as
+text searches, `git diff --check`, script syntax checks, DT source compilation
+after an approved DTS change, and command dry-runs that only print commands.
+The final response must clearly separate lightweight checks Codex actually ran
+from manual build, QEMU, regression, or hardware validation that still requires
+human confirmation.
 
 Optimizations or behavior changes under `core/` require explicit human
 confirmation before implementation. Document and discuss common-code timer,
 scheduler, vCPU, VM, IRQ, or memory-management optimizations first, then wait for
 approval before editing shared core code.
 
-Changes to `sdk/images/linux/sima-linux.dts` require explicit human confirmation
+Changes to `sdk/image/linux/beau-linux.dts` require explicit human confirmation
 before implementation. Treat VM2 Linux bootargs, CPU topology, device nodes,
 memory ranges, interrupt/timer properties, and debug-only boot parameters in
 this DTS as user-controlled. Discuss the intended DTS change first; after
-approval, update the generated `sdk/images/linux/sima-linux.dtb` only as part of
+approval, update the generated `sdk/image/linux/beau-linux.dtb` only as part of
 that approved DTS change.
 
 ## ARM64 Development Status
 
-The ARM64 bring-up currently targets QEMU `virt` for automated validation and
-rk356x for hardware-platform bring-up. QEMU uses `qemu-system-aarch64` with the
-`virt` machine, GICv3, EL2 virtualization enabled, and 8 physical CPUs. Use the
-wrapper script for the default QEMU launch:
+The ARM64 bring-up currently targets QEMU `virt` for the standard manual
+validation path and rk356x for hardware-platform bring-up. QEMU uses
+`qemu-system-aarch64` with the `virt` machine, GICv3, EL2 virtualization
+enabled, and 8 physical CPUs. Use the wrapper script for the default QEMU
+launch:
 
 ```bash
 ./scripts/kick.py
@@ -51,12 +62,13 @@ qemu-system-aarch64 \
   -m 1024M \
   -nographic \
   -serial mon:stdio \
-  -kernel out/qemu_out/sima.debug.out \
-  -device loader,file=sdk/images/linux/Image,addr=0x70000000,force-raw=on \
-  -device loader,file=sdk/images/linux/Initrd,addr=0x74000000,force-raw=on
+  -kernel out/qemu_out/beau.debug.out \
+  -device loader,file=sdk/image/linux/Image,addr=0x70000000,force-raw=on \
+  -device loader,file=sdk/image/linux/Initrd,addr=0x74000000,force-raw=on
 ```
 
-Set `SIMA_TOOLCHAINS` to the bare-metal toolchain bin directory, then build:
+For manual validation, set `BEAU_TOOLCHAINS` to the bare-metal toolchain bin
+directory, then build:
 
 ```bash
 ./scripts/kick.py --build --dry-run
@@ -66,7 +78,7 @@ Set `SIMA_TOOLCHAINS` to the bare-metal toolchain bin directory, then build:
 The rk356x hardware-platform skeleton builds with the same toolchain:
 
 ```bash
-PATH=${SIMA_TOOLCHAINS}:$PATH \
+PATH=${BEAU_TOOLCHAINS}:$PATH \
 make ARCH=arm64 PLATFORM=rk356x CROSS_COMPILE=aarch64-none-elf- -j$(nproc)
 ```
 
@@ -74,42 +86,42 @@ The default build output directories are platform-scoped:
 `out/qemu_out` for `PLATFORM=qemu` and `out/rk356x_out` for
 `PLATFORM=rk356x`.
 
-Hardware validation for rk356x is manual for now: flash the generated SIMA
+Hardware validation for rk356x is manual for now: flash the generated BEAU
 image with the board workflow and inspect serial logs for EL2 boot, MMU setup,
-GIC init, the SIMA shell prompt, and VM launch logs.
+GIC init, the BEAU shell prompt, and VM launch logs.
 
-LK and Zephyr stay as `.incbin` RTOS images under `sdk/images`:
-`sdk/images/lk.bin` and `sdk/images/zephyr.bin`. VM2 Linux uses
-`sdk/images/linux/Image` and `sdk/images/linux/Initrd`; QEMU stages them with
-`-device loader` at `0x70000000` and `0x74000000`, then SIMA copies them into
-VM2 guest RAM. The Linux DTB is `sdk/images/linux/sima-linux.dtb` and remains embedded
-as a small `.incbin` module because it describes Linux running on SIMA.
+LK and Zephyr stay as `.incbin` RTOS images under `sdk/image`:
+`sdk/image/lk.bin` and `sdk/image/zephyr.bin`. VM2 Linux uses
+`sdk/image/linux/Image` and `sdk/image/linux/Initrd`; QEMU stages them with
+`-device loader` at `0x70000000` and `0x74000000`, then BEAU copies them into
+VM2 guest RAM. The Linux DTB is `sdk/image/linux/beau-linux.dtb` and remains embedded
+as a small `.incbin` module because it describes Linux running on BEAU.
 
 Current QEMU VM layout:
 
 - VM0 is the Zephyr service VM.
-  - Image: `sdk/images/zephyr.bin`
+  - Image: `sdk/image/zephyr.bin`
   - Raw image tag: `zephyr`
   - Load address and entry: `0x42000000`
   - Identity RAM window: `0x42000000-0x48000000`
   - vCPUs: 4, running on ordinary-core pCPU0, pCPU2, pCPU3, and pCPU4
 - VM1 is the LK pre-launched VM.
-  - Image: `sdk/images/lk.bin`
+  - Image: `sdk/image/lk.bin`
   - Raw image tag: `lk`
   - Load address and entry: `0x40100000`
   - Identity RAM window: `0x40000000-0x42000000`
   - vCPUs: 4, using mixed pCPUs 3, 5, 6, and 7
 - VM2 is the Linux pre-launched VM.
-  - Kernel image: `sdk/images/linux/Image`
+  - Kernel image: `sdk/image/linux/Image`
   - Kernel module tag: `linux`
   - QEMU kernel stage address: `0x70000000`
   - Kernel load address and entry: `0x48080000`
-  - Initrd image: `sdk/images/linux/Initrd`
+  - Initrd image: `sdk/image/linux/Initrd`
   - Initrd module tag: `linux-initrd`
   - QEMU initrd stage address: `0x74000000`
   - Initrd load address: `0x4c000000`
-  - DTB image: `sdk/images/linux/sima-linux.dtb`
-  - DTB module tag: `sima-linux-dtb`
+  - DTB image: `sdk/image/linux/beau-linux.dtb`
+  - DTB module tag: `beau-linux-dtb`
   - Boot console: `console=ttyAMA0 earlycon=pl011,0x09000000`
   - Identity RAM window: `0x48000000-0x50000000`
   - vCPUs: 4, running on pCPU1, pCPU4, pCPU6, and pCPU7
@@ -122,12 +134,12 @@ Current QEMU VM layout:
   Each VM's vCPU0/BSP is kept on a pCPU that no other VM uses: VM0 on pCPU2,
   VM1 on pCPU5, and VM2 on pCPU1.
 
-The generated `out/qemu_out/sima.debug.out` has been boot-tested on QEMU. The
-build also emits `out/qemu_out/sima.out` as the base link image and
-`out/qemu_out/sima.debug.bin` as the raw debug image. Zephyr and LK autostart
+The generated `out/qemu_out/beau.debug.out` has been boot-tested on QEMU. The
+build also emits `out/qemu_out/beau.out` as the base link image and
+`out/qemu_out/beau.debug.bin` as the raw debug image. Zephyr and LK autostart
 from embedded RTOS images. VM2 Linux autostarts when QEMU stages `Image` and
-`Initrd`; SIMA supplies the embedded `sima-linux.dtb`.
-The SIMA shell stays quiet during late guest AP bring-up; press Enter after the
+`Initrd`; BEAU supplies the embedded `beau-linux.dtb`.
+The BEAU shell stays quiet during late guest AP bring-up; press Enter after the
 boot logs settle to show the `console:\>` prompt.
 
 ## Implemented
@@ -136,13 +148,13 @@ boot logs settle to show the `console:\>` prompt.
 - `scripts/kick.py` QEMU launcher with `--kernel`, `--qemu`, `--smp`,
   `--memory`, `--toolchains`, `--cross-prefix`, `--build`, `--dry-run`, and
   extra QEMU argument support.
-- `scripts/regress.py` boot regression harness for build, QEMU launch, SIMA
+- `scripts/regress.py` boot regression harness for build, QEMU launch, BEAU
   shell commands, VM console switching, and fatal boot-log checks.
 - QEMU platform code and static board/scenario configuration under
   `arch/arm64/platform/qemu`.
-- Bare-boot image embedding for LK and Zephyr raw images from `sdk/images`.
+- Bare-boot image embedding for LK and Zephyr raw images from `sdk/image`.
 - Linux VM2 loader tags for externally staged `Image` and `Initrd`, plus the
-  embedded `sima-linux.dtb` module.
+  embedded `beau-linux.dtb` module.
 - Static QEMU VM configuration for Zephyr as the service VM and LK/Linux as
   pre-launched VMs.
 - QEMU guest RAM, GIC, and PL011 layout is centralized in each VM's
@@ -157,7 +169,7 @@ boot logs settle to show the `console:\>` prompt.
   and vPL011 IPA windows are registered as vio MMIO instead of RAM mappings.
 - Zephyr and LK are marked with `GUEST_FLAG_NO_FW`, so the boot-info path does
   not require external ACPI/FDT modules for the current RTOS images. VM2 Linux
-  clears that flag, receives `sima-linux.dtb`, and uses the loader/module path
+  clears that flag, receives `beau-linux.dtb`, and uses the loader/module path
   instead of platform `.incbin` image embedding for `Image` and `Initrd`.
 - EL2 entry, exception vector setup, MMU enablement, and 1:1 host mappings.
   The primary and secondary EL2 entry paths explicitly select `SP_EL2` with
@@ -174,7 +186,7 @@ boot logs settle to show the `console:\>` prompt.
 - Raw-image loader support for ARM64 guest RAM start and FDT placement.
 - PSCI virtualization for guest `CPU_ON`, `CPU_OFF`, `AFFINITY_INFO`,
   `SYSTEM_OFF`, and `SYSTEM_RESET`.
-- SIMA shell `reboot` command wired to host PSCI system reset.
+- BEAU shell `reboot` command wired to host PSCI system reset.
 - PSCI-based host secondary CPU bring-up with `MAX_PCPU_NUM=8`.
 - VM0 and VM1 vCPUs share pCPU3 through the existing `sched_iorr` scheduler.
   VM0 uses ordinary-core pCPU0, pCPU2, pCPU3, and pCPU4; VM1 uses mixed pCPU3,
@@ -204,10 +216,10 @@ boot logs settle to show the `console:\>` prompt.
   - `irqstat`
   - `dumpstat [vm id]`
   - `vsh <vm id>`
-- Press Tab in the SIMA shell to display `registered commands`; `help` is not
-  registered as a SIMA console command.
+- Press Tab in the BEAU shell to display `registered commands`; `help` is not
+  registered as a BEAU console command.
 - `vsh <vm id>` switches the serial console to a VM vPL011/vUART console.
-  Ctrl-D switches back to the SIMA shell.
+  Ctrl-D switches back to the BEAU shell.
 - `schedstat` prints the scheduler algorithm and one physical-CPU row with
   `pcpu`, scheduler `timer` callbacks, context `switches`, `resched` requests,
   runnable-thread count, and current `thread`.
@@ -233,11 +245,11 @@ boot logs settle to show the `console:\>` prompt.
   injection, a raw guest stack trace from the VM register image, and the host
   stack saved by the vCPU thread on its bound pCPU. IRQ exits report `ec:n/a`
   because `ESR_EL2.EC` is only meaningful for synchronous exits. Guest stack
-  entries are raw addresses because SIMA does not embed guest symbol tables. The
-  debug image embeds the SIMA symbol table, so host stack return addresses are
+  entries are raw addresses because BEAU does not embed guest symbol tables. The
+  debug image embeds the BEAU symbol table, so host stack return addresses are
   printed as `function+offset`. Offline vCPUs skip stack output.
 - ARM64 host exception call traces resolve return addresses through the
-  embedded SIMA symbol table and print `function+offset` beside the raw LR.
+  embedded BEAU symbol table and print `function+offset` beside the raw LR.
 - VM vPL011 TX output from the currently selected `vsh` VM is written into a
   Xen-style per-VM async console ring buffer, using monotonic producer/consumer
   indexes and a 4KB power-of-two data area with 4095 bytes of usable capacity.
@@ -245,10 +257,10 @@ boot logs settle to show the `console:\>` prompt.
   console in bounded batches, so guest PL011 writes no longer wait for host
   serial output. The ring is internal only; there is no shell command for
   changing console output mode or reading normal console-ring stats.
-- Non-selected VM console output is not replayed into the SIMA shell.
+- Non-selected VM console output is not replayed into the BEAU shell.
 - VM exception logs have a separate 4KB/4095-byte per-VM ring reserved for VM
   trap/oops capture. The ring is internal debug plumbing and is no longer
-  exposed as a SIMA shell command.
+  exposed as a BEAU shell command.
 - vUART/vPL011 layering:
   - `vuart` owns the upper VM console interface and host console integration.
   - `vpl011` is the ARM64 PL011 backend implementation.
@@ -289,7 +301,7 @@ boot logs settle to show the `console:\>` prompt.
 - ARM64 memory logging for host stage-1 and VM stage-2 mappings.
 - ARM64 exception stack dumps print directly to the console without per-line
   log prefixes.
-- SIMA log and shell/console strings are lowercase source literals; there is no
+- BEAU log and shell/console strings are lowercase source literals; there is no
   output-layer lowercase conversion.
 - ARM64 memory virtualization, interrupt virtualization, and vCPU
   virtualization code now includes English comments for module responsibilities,
@@ -345,7 +357,7 @@ The following have been verified on QEMU with `-smp 8`:
 - Zephyr no longer traps on `GICD_IPRIORITYR` byte writes.
 - Zephyr AP virtual timer interrupts no longer hit the host unexpected IRQ path.
 - LK still boots with 4 CPUs after Zephyr became the service VM.
-- The `reboot` shell command resets QEMU and restarts SIMA.
+- The `reboot` shell command resets QEMU and restarts BEAU.
 - `PLATFORM=rk356x` builds a hardware image. Boot correctness is pending manual
   flashing and serial-log validation.
 - VM2 Linux no longer stops at `smp: Bringing up secondary CPUs ...` in the
@@ -382,14 +394,14 @@ Status as of 2026-06-17:
 - Keep VM2 Linux at 4 vCPUs for validation. `maxcpus=1` or `maxcpu=1` can hide
   the SMP/timer symptom and may be useful as a temporary comparison point, but
   it is not a fix for the 4-vCPU VM2 Linux path.
-- Keep Linux assets under `sdk/images/linux`; the active Linux DT source is
-  `sdk/images/linux/sima-linux.dts`. This DTS must only be changed by an
+- Keep Linux assets under `sdk/image/linux`; the active Linux DT source is
+  `sdk/image/linux/beau-linux.dts`. This DTS must only be changed by an
   explicit manual edit. Do not let build scripts, regression scripts, or helper
   tools rewrite it implicitly.
-- After manually changing `sdk/images/linux/sima-linux.dts`, regenerate the
+- After manually changing `sdk/image/linux/beau-linux.dts`, regenerate the
   embedded DTB explicitly with:
-  `dtc -I dts -O dtb -o sdk/images/linux/sima-linux.dtb sdk/images/linux/sima-linux.dts`.
-  The SIMA image must then be rebuilt because `sima-linux.dtb` is included by
+  `dtc -I dts -O dtb -o sdk/image/linux/beau-linux.dtb sdk/image/linux/beau-linux.dts`.
+  The BEAU image must then be rebuilt because `beau-linux.dtb` is included by
   `arch/arm64/platform/qemu/platform_image.S`.
 - Timer DT interrupt IDs remain unchanged. The virtual timer still uses
   PPI/INTID 27 from `<1 13 4>`; current evidence does not require changing
@@ -397,7 +409,7 @@ Status as of 2026-06-17:
 - WFI/WFE trapping is kept disabled by default. Reference checks:
   the croc reference traps WFE as yield and WFI as block, while the anoa
   reference traps WFE as yield and uses an IRQ-wait path for WFI with a yield
-  threshold plus timeout. In SIMA QEMU, enabling TWI/TWE makes VM0/VM1/VM2
+  threshold plus timeout. In BEAU QEMU, enabling TWI/TWE makes VM0/VM1/VM2
   noticeably slower, so the default relies on hardware/vGIC wakeup.
 - The latest ITS validation keeps VM0/VM1 free of ITS/LPI exposure and exposes
   vITS only to VM2 Linux. This avoids perturbing RTOS guests while still
@@ -463,19 +475,18 @@ Status as of 2026-06-17:
     the host reschedule once and returns to EL1 so Linux can leave the idle path
     and unmask interrupts.
 - This fix intentionally does not modify `core/` scheduler/timer/vCPU code and
-  does not modify `sdk/images/linux/sima-linux.dts`.
-- Automated validation completed for the local fix:
-  `git diff --check -- arch/arm64/guest/vcpu_exit.c` passed, and the QEMU SIMA
+  does not modify `sdk/image/linux/beau-linux.dts`.
+- Human-run validation completed for the local fix:
+  `git diff --check -- arch/arm64/guest/vcpu_exit.c` passed, and the QEMU BEAU
   image rebuilt successfully with:
 
   ```bash
-  SIMA_TOOLCHAINS=/home/beau/sima-cc/bin \
-  PATH=/home/beau/sima-cc/bin:$PATH \
+  PATH=${BEAU_TOOLCHAINS}:$PATH \
   make ARCH=arm64 PLATFORM=qemu CROSS_COMPILE=aarch64-none-elf- -j$(nproc)
   ```
 
-  Updated outputs are `out/qemu_out/sima.debug.out` and
-  `out/qemu_out/sima.debug.bin`.
+  Updated outputs are `out/qemu_out/beau.debug.out` and
+  `out/qemu_out/beau.debug.bin`.
 - Manual validation is still pending. The next run should rebuild/boot the
   updated image, enter VM2 Linux as `root` / `root`, keep the 4-vCPU guest
   running past the previous RCU stall window, and confirm that vCPU0 no longer
@@ -488,11 +499,11 @@ Status as of 2026-06-17:
    run the standard QEMU regression and require VM0 Zephyr, VM1 LK, and VM2
    Linux root identity checks to pass.
 2. Do not change `core/` scheduler/timer/vCPU code or
-   `sdk/images/linux/sima-linux.dts` as part of the first RCU fix attempt.
+   `sdk/image/linux/beau-linux.dts` as part of the first RCU fix attempt.
    Those areas require explicit human confirmation and are not the current
    narrow failure boundary.
 3. Reproduce the stall from VM2 root shell with the 4-vCPU configuration. On
-   the first RCU warning, return to the SIMA shell and capture `dumpstat 2`,
+   the first RCU warning, return to the BEAU shell and capture `dumpstat 2`,
    `vcpus`, `schedstat`, and `irqstat`.
 4. In `dumpstat 2`, compare vCPU0 against the other VM2 vCPUs: live CNTV_CTL,
    CNTV_CVAL, CNTVCT, `cntv_el2_masked`, timer virq, LR0/LR1, vGIC descriptor
@@ -524,7 +535,7 @@ Status as of 2026-06-17:
 - Re-enabling WFI/WFE traps slowed the QEMU 3OS scenario and affected VM0/VM1.
   Keep HCR_EL2.TWI/TWE clear unless a specific diagnostic run requires trapped
   idle instructions.
-- Porting anoa's full switch-out backup timer model directly to SIMA caused a
+- Porting anoa's full switch-out backup timer model directly to BEAU caused a
   large VM2 slowdown. Do not arm a backup timer on every vCPU unload in the
   current QEMU 3OS path.
 - Expanding the vITS software model to a static 8192-LPI descriptor array
@@ -532,7 +543,7 @@ Status as of 2026-06-17:
   Keep the compact active-window model unless dynamic allocation is added.
 - Expanding the generated QEMU vFDT PL011 clocks to include both `uartclk` and
   `apb_pclk` did not affect VM2. VM2 uses the embedded
-  `sdk/images/linux/sima-linux.dtb`, whose DTS already has both clocks.
+  `sdk/image/linux/beau-linux.dtb`, whose DTS already has both clocks.
 
 ## Code Commenting Guidelines
 
@@ -584,7 +595,7 @@ virtualization port.
 - QEMU VM layout is still statically configured in `vm_config.c`;
   QEMU FDT parsing is not yet used to derive VM layout.
 - Zephyr and LK are RTOS raw images and boot with `GUEST_FLAG_NO_FW`. VM2 Linux
-  uses a loader/module path for `Image` and `Initrd`, while its Linux-on-SIMA
+  uses a loader/module path for `Image` and `Initrd`, while its Linux-on-BEAU
   DTB remains embedded.
 - VM2 Linux runs as a 4-vCPU guest. The path has reached the Linux login prompt
   during QEMU validation; repeated cold-boot coverage is still needed before
@@ -594,8 +605,8 @@ virtualization port.
 - VM console output from SMP guests can interleave because multiple guest CPUs
   write concurrently to the same PL011 console.
 - Stage-2 mapping is still static for the QEMU `virt` platform.
-- The automated regression harness covers the core multi-VM boot sequence, but
-  broader stress and overflow coverage is still pending.
+- The regression harness covers the core multi-VM boot sequence when run
+  manually, but broader stress and overflow coverage is still pending.
 
 ## Next Steps
 

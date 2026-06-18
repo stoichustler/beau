@@ -1,5 +1,5 @@
 #
-# SIMA hypervisor Makefile
+# BEAU hypervisor Makefile
 #
 
 API_MAJOR_VERSION=1
@@ -23,8 +23,8 @@ HV_DEFAULT_OBJDIR := $(CURDIR)/out/$(PLATFORM)_out
 endif
 HV_OBJDIR ?= $(HV_DEFAULT_OBJDIR)
 HV_MODDIR ?= $(HV_OBJDIR)/modules
-HV_FILE := sima
-HV_DEBUG_FILE := sima.debug
+HV_FILE := beau
+HV_DEBUG_FILE := beau.debug
 
 # initialize the flags we used
 CFLAGS :=
@@ -356,8 +356,8 @@ $(LINUX_IMAGE_SIZE_H): sdk/image/linux/Image sdk/image/linux/Initrd | $(HV_OBJDI
 		echo "/* Auto-generated from sdk/image. */"; \
 		echo "#ifndef LINUX_IMAGE_SIZES_H"; \
 		echo "#define LINUX_IMAGE_SIZES_H"; \
-		echo "#define SIMA_LINUX_IMAGE_SIZE $${image_size}U"; \
-		echo "#define SIMA_LINUX_INITRD_SIZE $${initrd_size}U"; \
+		echo "#define BEAU_LINUX_IMAGE_SIZE $${image_size}U"; \
+		echo "#define BEAU_LINUX_INITRD_SIZE $${initrd_size}U"; \
 		echo "#endif /* LINUX_IMAGE_SIZES_H */"; \
 	} > $@
 
@@ -478,11 +478,11 @@ $(VM_CFG_C_OBJS): $(HV_OBJDIR)/%.o: %.c $(HEADERS) $(ARCH_PRE_BUILD_TARGETS)
 
 ifeq ($(ARCH),arm64)
 ifeq ($(PLATFORM),qemu)
-sdk/image/linux/sima-linux.dtb: sdk/image/linux/sima-linux.dts
+sdk/image/linux/beau-linux.dtb: sdk/image/linux/beau-linux.dts
 	$(Q)echo "dtc       $@"
 	$(Q)$(DTC) -I dts -O dtb -o $@ $<
 
-$(HV_OBJDIR)/arch/arm64/platform/qemu/platform_image.o: sdk/image/linux/sima-linux.dtb
+$(HV_OBJDIR)/arch/arm64/platform/qemu/platform_image.o: sdk/image/linux/beau-linux.dtb
 endif
 endif
 

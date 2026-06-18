@@ -1,8 +1,8 @@
 /dts-v1/;
 
 / {
-	compatible = "sima,linux-virt";
-	model = "SIMA Linux virtual platform";
+	compatible = "beau,linux-virt";
+	model = "BEAU Linux virtual platform";
 	#address-cells = <2>;
 	#size-cells = <2>;
 	interrupt-parent = <&gic>;

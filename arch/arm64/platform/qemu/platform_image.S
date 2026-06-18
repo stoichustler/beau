@@ -15,15 +15,15 @@ qemu_lk_image_end:
 	.set qemu_lk_image_size, qemu_lk_image_end - qemu_lk_image_start
 	.align 12
 
-	.section .rodata.sima_linux_dtb, "a", %progbits
+	.section .rodata.beau_linux_dtb, "a", %progbits
 	.align 12
-	.globl qemu_sima_linux_dtb_start
-qemu_sima_linux_dtb_start:
-	.incbin "sdk/image/linux/sima-linux.dtb"
-	.globl qemu_sima_linux_dtb_end
-qemu_sima_linux_dtb_end:
-	.globl qemu_sima_linux_dtb_size
-	.set qemu_sima_linux_dtb_size, qemu_sima_linux_dtb_end - qemu_sima_linux_dtb_start
+	.globl qemu_beau_linux_dtb_start
+qemu_beau_linux_dtb_start:
+	.incbin "sdk/image/linux/beau-linux.dtb"
+	.globl qemu_beau_linux_dtb_end
+qemu_beau_linux_dtb_end:
+	.globl qemu_beau_linux_dtb_size
+	.set qemu_beau_linux_dtb_size, qemu_beau_linux_dtb_end - qemu_beau_linux_dtb_start
 	.align 12
 
 	.section .rodata.zephyr_image, "a", %progbits

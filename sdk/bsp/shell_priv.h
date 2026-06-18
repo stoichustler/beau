@@ -85,7 +85,7 @@ struct shell {
 
 #define SHELL_CMD_VM_CONSOLE		"vsh"
 #define SHELL_CMD_VM_CONSOLE_PARAM	"<vm id>"
-#define SHELL_CMD_VM_CONSOLE_HELP	"switch to the vm console. type `CTRL-D` switch to SIMA"
+#define SHELL_CMD_VM_CONSOLE_HELP	"switch to the vm console. type `CTRL-D` switch to BEAU"
 
 void shell_puts(const char *string_ptr);
 void shell_item_begin(const char *fmt, ...);

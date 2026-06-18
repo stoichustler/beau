@@ -17,8 +17,8 @@ extern const uint8_t qemu_lk_image_start[];
 extern const uint8_t qemu_lk_image_size[];
 extern const uint8_t qemu_zephyr_image_start[];
 extern const uint8_t qemu_zephyr_image_size[];
-extern const uint8_t qemu_sima_linux_dtb_start[];
-extern const uint8_t qemu_sima_linux_dtb_size[];
+extern const uint8_t qemu_beau_linux_dtb_start[];
+extern const uint8_t qemu_beau_linux_dtb_size[];
 
 /*
  * QEMU keeps a deliberately static VM layout for the SDK bring-up path:
@@ -139,10 +139,10 @@ struct acrn_vm_config vm_configs[CONFIG_MAX_VM_NUM] = {
 			.kernel_load_addr = QEMU_LINUX_KERNEL_LOAD_ADDR,
 			.kernel_entry_addr = QEMU_LINUX_KERNEL_LOAD_ADDR,
 			.kernel_ramdisk_addr = QEMU_LINUX_INITRD_LOAD_ADDR,
-			.kernel_ramdisk_size = SIMA_LINUX_INITRD_SIZE,
+			.kernel_ramdisk_size = BEAU_LINUX_INITRD_SIZE,
 		},
 		.fdt_config = {
-			.fdt_mod_tag = "Linux-dtb",
+			.fdt_mod_tag = "beau-linux-dtb",
 		},
 		.arch = {
 			.guest_ram_start = QEMU_LINUX_RAM_START,
@@ -177,18 +177,18 @@ struct bare_boot_option bare_boot_options[] = {
 	},
 	{
 		.addr = QEMU_LINUX_IMAGE_STAGE_ADDR,
-		.size = SIMA_LINUX_IMAGE_SIZE,
+		.size = BEAU_LINUX_IMAGE_SIZE,
 		.tag = "Linux",
 	},
 	{
 		.addr = QEMU_LINUX_INITRD_STAGE_ADDR,
-		.size = SIMA_LINUX_INITRD_SIZE,
+		.size = BEAU_LINUX_INITRD_SIZE,
 		.tag = "Initrd",
 	},
 	{
-		.addr = (uint64_t)qemu_sima_linux_dtb_start,
-		.size = (uint64_t)qemu_sima_linux_dtb_size,
-		.tag = "Linux-dtb",
+		.addr = (uint64_t)qemu_beau_linux_dtb_start,
+		.size = (uint64_t)qemu_beau_linux_dtb_size,
+		.tag = "beau-linux-dtb",
 	},
 };
 

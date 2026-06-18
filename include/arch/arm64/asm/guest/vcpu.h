@@ -199,7 +199,7 @@ struct arm64_vcpu_last_cpuif {
 
 /*
  * A vGIC maintenance snapshot captures live EL2 CPU-interface state at the
- * boundary where hardware LR state is reconciled with SIMA's software IRQ
+ * boundary where hardware LR state is reconciled with BEAU's software IRQ
  * model. This lets dumpstat distinguish "maintenance never fired" from
  * "maintenance fired but the LR lifecycle was not consumed".
  */

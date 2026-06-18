@@ -121,7 +121,7 @@ struct acrn_vm_config vm_configs[CONFIG_MAX_VM_NUM] = {
 			.kernel_load_addr = RK356X_LINUX_KERNEL_LOAD_ADDR,
 			.kernel_entry_addr = RK356X_LINUX_KERNEL_LOAD_ADDR,
 			.kernel_ramdisk_addr = RK356X_LINUX_INITRD_LOAD_ADDR,
-			.kernel_ramdisk_size = SIMA_LINUX_INITRD_SIZE,
+			.kernel_ramdisk_size = BEAU_LINUX_INITRD_SIZE,
 		},
 		.arch = {
 			.guest_ram_start = RK356X_LINUX_RAM_START,
@@ -154,12 +154,12 @@ struct bare_boot_option bare_boot_options[] = {
 	},
 	{
 		.addr = RK356X_LINUX_IMAGE_STAGE_ADDR,
-		.size = SIMA_LINUX_IMAGE_SIZE,
+		.size = BEAU_LINUX_IMAGE_SIZE,
 		.tag = "linux",
 	},
 	{
 		.addr = RK356X_LINUX_INITRD_STAGE_ADDR,
-		.size = SIMA_LINUX_INITRD_SIZE,
+		.size = BEAU_LINUX_INITRD_SIZE,
 		.tag = "linux-initrd",
 	},
 };

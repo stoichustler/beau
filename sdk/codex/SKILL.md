@@ -1,9 +1,9 @@
 ---
-name: sima-hypervisor-dev
-description: Develop, debug, validate, and document the SIMA hypervisor in this repository, especially the ARM64 QEMU virt and rk356x bring-up, static VM configuration, stage-2 identity mappings, vCPU scheduling/shared-pCPU behavior, vGIC/vPL011/vUART console paths, hypercalls, shell commands, and SDK documentation. Use when Codex is asked to modify SIMA hypervisor code, investigate VM boot/runtime issues, add observability commands, update ARM64 virtualization logic, or run QEMU/build validation for this tree.
+name: beau-hypervisor-dev
+description: Develop, debug, validate, and document the BEAU hypervisor in this repository, especially the ARM64 QEMU virt and rk356x bring-up, static VM configuration, stage-2 identity mappings, vCPU scheduling/shared-pCPU behavior, vGIC/vPL011/vUART console paths, hypercalls, shell commands, and SDK documentation. Use when Codex is asked to modify BEAU hypervisor code, investigate VM boot/runtime issues, add observability commands, update ARM64 virtualization logic, or run QEMU/build validation for this tree.
 ---
 
-# SIMA Hypervisor Development
+# BEAU Hypervisor Development
 
 ## Core Workflow
 
@@ -22,11 +22,11 @@ description: Develop, debug, validate, and document the SIMA hypervisor in this 
    - Preserve static VM configuration unless the user explicitly asks for dynamic policy.
    - Preserve QEMU RTOS stage-2 RAM identity mapping: guest IPA/GPA equals HPA/PA.
    - Keep Zephyr/LK RTOS boot paths independent of external ACPI/FDT modules.
-   - Keep LK and Zephyr image inputs under `sdk/images`, and keep Linux
-     `Image`, `Initrd`, `sima-linux.dts`, and `sima-linux.dtb` under
-     `sdk/images/linux`.
+   - Keep LK and Zephyr image inputs under `sdk/image`, and keep Linux
+     `Image`, `Initrd`, `beau-linux.dts`, and `beau-linux.dtb` under
+     `sdk/image/linux`.
    - Do not move Linux `Image` or `Initrd` into `.incbin`; use loader/module
-     delivery. The Linux-on-SIMA DTB may remain an embedded module.
+     delivery. The Linux-on-BEAU DTB may remain an embedded module.
 
 3. Make focused changes:
    - Follow existing module boundaries: `arch/arm64` for architecture logic, `core` for common scheduler/vCPU/VM logic, `sdk/debug` for shell and console tools, `sdk/boot` for boot loaders.
@@ -36,11 +36,11 @@ description: Develop, debug, validate, and document the SIMA hypervisor in this 
    - Add English comments for design intent, architecture invariants, ownership, and failure modes.
    - Avoid comments that restate assignments or obvious branches.
    - Do not write machine-local directory or file paths into documentation,
-     code design notes, or this skill. Use variables such as `SIMA_TOOLCHAINS`
+     code design notes, or this skill. Use variables such as `BEAU_TOOLCHAINS`
      or repository-relative paths instead.
 
 4. Validate before final response:
-   - Before any build or regression, confirm `SIMA_TOOLCHAINS` is set and
+   - Before any build or regression, confirm `BEAU_TOOLCHAINS` is set and
      points to a valid bare-metal toolchain bin directory.
    - Build ARM64 QEMU:
      ```bash
@@ -50,14 +50,14 @@ description: Develop, debug, validate, and document the SIMA hypervisor in this 
    - Build rk356x when changing platform selection, common ARM64 platform
      guards, guest image embedding, or rk356x files:
      ```bash
-     PATH=${SIMA_TOOLCHAINS}:$PATH \
+     PATH=${BEAU_TOOLCHAINS}:$PATH \
      make ARCH=arm64 PLATFORM=rk356x CROSS_COMPILE=aarch64-none-elf- -j$(nproc)
      ```
    - Expect platform-scoped default output directories:
      `out/qemu_out` for QEMU and `out/rk356x_out` for rk356x.
    - For debug/shell/console changes, force rebuild stale debug artifacts first:
      ```bash
-     rm -f out/qemu_out/modules/libdebug.a out/qemu_out/sima.out out/qemu_out/sima.debug.out out/qemu_out/sima.debug.bin
+     rm -f out/qemu_out/modules/libdebug.a out/qemu_out/beau.out out/qemu_out/beau.debug.out out/qemu_out/beau.debug.bin
      ```
    - Check QEMU command:
      ```bash
@@ -83,9 +83,9 @@ description: Develop, debug, validate, and document the SIMA hypervisor in this 
 
 - Keep rk356x-specific RAM, GIC, UART, and VM layout data under
   `arch/arm64/platform/rk356x`.
-- Keep guest image embedding pointed at `sdk/images/lk.bin`,
-  `sdk/images/zephyr.bin`, and small DTB modules. Keep Linux `Image` and
-  `Initrd` under `sdk/images` but load them through module/loader staging.
+- Keep guest image embedding pointed at `sdk/image/lk.bin`,
+  `sdk/image/zephyr.bin`, and small DTB modules. Keep Linux `Image` and
+  `Initrd` under `sdk/image` but load them through module/loader staging.
 - Treat rk356x hardware validation as manual flashing and serial-log inspection
   until an automated board workflow exists.
 - Do not add board flashing commands or local artifact paths to documentation

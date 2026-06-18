@@ -29,21 +29,21 @@ def getenv(name, default=None):
 
 
 def parse_args():
-    kernel_env = getenv("SIMA_KERNEL")
-    kernel = relpath(kernel_env) if kernel_env else ROOT / "out/qemu_out/sima.debug.out"
-    toolchains = getenv("SIMA_TOOLCHAINS")
-    toolchains = getenv("SIMA_TOOLCHAIN", toolchains)
+    kernel_env = getenv("BEAU_KERNEL")
+    kernel = relpath(kernel_env) if kernel_env else ROOT / "out/qemu_out/beau.debug.out"
+    toolchains = getenv("BEAU_TOOLCHAINS")
+    toolchains = getenv("BEAU_TOOLCHAIN", toolchains)
     toolchains = relpath(toolchains) if toolchains else None
 
     parser = argparse.ArgumentParser(description="Build and launch the ARM64 QEMU image.")
     parser.add_argument("-k", "--kernel", default=kernel, type=relpath)
     parser.add_argument("--qemu", default=os.getenv("QEMU_SYSTEM_AARCH64", "qemu-system-aarch64"))
-    parser.add_argument("--smp", default=getenv("SIMA_QEMU_SMP", "8"))
-    parser.add_argument("-m", "--memory", default=getenv("SIMA_QEMU_MEM", "1024M"))
+    parser.add_argument("--smp", default=getenv("BEAU_QEMU_SMP", "8"))
+    parser.add_argument("-m", "--memory", default=getenv("BEAU_QEMU_MEM", "1024M"))
     parser.add_argument("--linux-image", default=ROOT / "sdk/image/linux/Image", type=relpath)
     parser.add_argument("--linux-initrd", default=ROOT / "sdk/image/linux/Initrd", type=relpath)
     parser.add_argument("--toolchains", "--toolchain", default=toolchains, type=relpath)
-    parser.add_argument("--cross-prefix", default=getenv("SIMA_CROSS_COMPILE", "aarch64-none-elf-"))
+    parser.add_argument("--cross-prefix", default=getenv("BEAU_CROSS_COMPILE", "aarch64-none-elf-"))
     parser.add_argument("--build", action="store_true")
     parser.add_argument("-n", "--dry-run", action="store_true")
     args, extra = parser.parse_known_args()

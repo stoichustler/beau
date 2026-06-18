@@ -8,7 +8,7 @@ TEXT_TYPES = set("TtWw")
 
 
 def parse_args():
-    parser = argparse.ArgumentParser(description="Generate a SIMA debug symbol table C source.")
+    parser = argparse.ArgumentParser(description="Generate a BEAU debug symbol table C source.")
     parser.add_argument("--nm", default="nm")
     parser.add_argument("--elf", required=True, type=Path)
     parser.add_argument("--out", required=True, type=Path)

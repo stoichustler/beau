@@ -626,7 +626,7 @@ void shell_kick(void)
 
 		/*
 		 * Guest APs can still be brought up by PSCI after shell_start() because
-		 * only VM BSPs are launched by the host autostart path. Keep the SIMA
+		 * only VM BSPs are launched by the host autostart path. Keep the BEAU
 		 * shell quiet until the user presses Enter so the first prompt does not
 		 * appear in the middle of late vCPU scheduling logs.
 		 */
@@ -714,7 +714,7 @@ static void shell_print_registered_commands(void)
 	char str[MAX_STR_SIZE];
 	uint32_t cmd_cnt = p_shell->cmd_count + p_shell->arch_cmd_count;
 	/* Print title */
-	shell_puts("\r\n\r\n────────── [SIMA commands] ──────────\r\n\r\n");
+	shell_puts("\r\n\r\n────────── [BEAU commands] ──────────\r\n\r\n");
 
 	/* Proceed based on the number of registered commands. */
 	if (cmd_cnt == 0U) {

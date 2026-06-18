@@ -10,7 +10,7 @@
 #include <types.h>
 
 /*
- * ARM64 system-register quick reference for SIMA:
+ * ARM64 system-register quick reference for BEAU:
  *
  * MPIDR_EL1: CPU affinity identifier. The low affinity levels are used to map
  *            physical CPUs, redistributors, and guest vMPIDR values.

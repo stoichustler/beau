@@ -338,7 +338,7 @@ static void vuart_console_rx_chars(struct acrn_vuart *vu)
 		if (ch == GUEST_CONSOLE_TO_HV_SWITCH_KEY) {
 			console_vm_ring_drain_internal(target_vmid);
 			console_vmid = ACRN_INVALID_VMID;
-			printf("\r\n\r\n──────── [switch to SIMA shell] ────────\r\n");
+			printf("\r\n\r\n──────── [switch to BEAU shell] ────────\r\n");
 			goto exit;
 		} else if (vu != NULL) {
 			vuart_putchar(vu, ch);

@@ -1044,7 +1044,7 @@ static int32_t shell_dumpstat_vcpu(struct acrn_vcpu *vcpu)
 	if (vcpu->state != VCPU_OFFLINE) {
 		shell_item_section("guest stack symbols:none");
 		shell_dumpstat_vm_stack(vcpu, regs);
-		shell_item_section("host stack symbols:sima");
+		shell_item_section("host stack symbols:beau");
 		shell_dumpstat_host_stack(vcpu);
 	}
 	shell_item_end();

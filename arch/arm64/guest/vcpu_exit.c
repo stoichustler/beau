@@ -329,7 +329,7 @@ static int32_t handle_mmio_abort(struct acrn_vcpu *vcpu)
 	int32_t ret;
 
 	/*
-	 * Data aborts are load/store memory aborts. SIMA intentionally leaves
+	 * Data aborts are load/store memory aborts. BEAU intentionally leaves
 	 * guest device IPA windows unmapped at stage-2 so reads and writes trap
 	 * here and become MMIO requests. Instruction aborts are fetch failures and
 	 * must not use this path because ESR.DABT fields describe data access size,

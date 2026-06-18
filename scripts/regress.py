@@ -54,19 +54,19 @@ def build_env(toolchains):
 
 
 def parse_args():
-    toolchains = getenv("SIMA_TOOLCHAINS")
-    toolchains = getenv("SIMA_TOOLCHAIN", toolchains)
+    toolchains = getenv("BEAU_TOOLCHAINS")
+    toolchains = getenv("BEAU_TOOLCHAIN", toolchains)
     toolchains = relpath(toolchains) if toolchains else None
 
     parser = argparse.ArgumentParser(description="Run the ARM64 QEMU boot regression.")
     parser.add_argument("--toolchains", "--toolchain", default=toolchains, type=relpath)
-    parser.add_argument("--cross-prefix", default=getenv("SIMA_CROSS_COMPILE", "aarch64-none-elf-"))
-    parser.add_argument("--kernel", default=ROOT / "out/qemu_out/sima.debug.out", type=relpath)
+    parser.add_argument("--cross-prefix", default=getenv("BEAU_CROSS_COMPILE", "aarch64-none-elf-"))
+    parser.add_argument("--kernel", default=ROOT / "out/qemu_out/beau.debug.out", type=relpath)
     parser.add_argument("--qemu", default=os.getenv("QEMU_SYSTEM_AARCH64", "qemu-system-aarch64"))
-    parser.add_argument("--smp", default=getenv("SIMA_QEMU_SMP", "8"))
-    parser.add_argument("-m", "--memory", default=getenv("SIMA_QEMU_MEM", "1024M"))
-    parser.add_argument("--linux-image", default=ROOT / "sdk/images/linux/Image", type=relpath)
-    parser.add_argument("--linux-initrd", default=ROOT / "sdk/images/linux/Initrd", type=relpath)
+    parser.add_argument("--smp", default=getenv("BEAU_QEMU_SMP", "8"))
+    parser.add_argument("-m", "--memory", default=getenv("BEAU_QEMU_MEM", "1024M"))
+    parser.add_argument("--linux-image", default=ROOT / "sdk/image/linux/Image", type=relpath)
+    parser.add_argument("--linux-initrd", default=ROOT / "sdk/image/linux/Initrd", type=relpath)
     parser.add_argument("--timeout", type=float, default=120.0)
     parser.add_argument("--log", default=ROOT / "out/qemu_out/regress.log", type=relpath)
     parser.add_argument("--no-build", action="store_true")
@@ -243,7 +243,7 @@ class QemuSession:
     def command(self, line, patterns, rejects=None):
         rejects = [] if rejects is None else rejects
         self.send(line + ENTER)
-        text = self.expect(PROMPT, f"{line} returns to SIMA shell")
+        text = self.expect(PROMPT, f"{line} returns to BEAU shell")
         for pattern in patterns:
             if pattern not in text:
                 raise RuntimeError(f"{line!r} output missing {pattern!r}")
@@ -256,7 +256,7 @@ class QemuSession:
         print(f"[regress] diagnostics: {label}", flush=True)
         try:
             self.send(CTRL_D)
-            self.expect(PROMPT, f"return to SIMA shell for {label}", timeout=5.0, keepalive=ENTER)
+            self.expect(PROMPT, f"return to BEAU shell for {label}", timeout=5.0, keepalive=ENTER)
             for line in ("vcpus", "schedstat", "irqstat", f"dumpstat {vmid}"):
                 self.send(line + ENTER)
                 self.expect(PROMPT, f"{line} diagnostics", timeout=15.0, keepalive=ENTER)
@@ -276,7 +276,7 @@ def run_qemu(args, cmd):
 
     print(f"[regress] qemu: {quote(cmd)}", flush=True)
     with QemuSession(cmd, args.log, args.timeout) as qemu:
-        qemu.expect(PROMPT, "SIMA shell prompt", keepalive=ENTER)
+        qemu.expect(PROMPT, "BEAU shell prompt", keepalive=ENTER)
         qemu.command("vcpus", ["vmid", "vcpu", "pcpu_mode", "isolate", "shared", "switches", "since.us"])
         qemu.command("schedstat", [
             "schedstat algorithm:sched_iorr",
@@ -304,7 +304,7 @@ def run_qemu(args, cmd):
                 "irq:",
                 "timer:",
                 "├─  guest stack symbols:none",
-                "├─  host stack symbols:sima",
+                "├─  host stack symbols:beau",
                 "│   pcpu:",
                 "source:vcpu-thread",
                 "+0x",

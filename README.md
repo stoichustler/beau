@@ -1,20 +1,22 @@
-# SIMA HYPERVISOR
+# BEAU HYPERVISOR
 
 ```text
- ____  ___ __  __    _
-/ ___||_ _|  \/  |  / \
-\___ \ | || |\/| | / _ \
- ___) || || |  | |/ ___ \
-|____/|___|_|  |_/_/   \_\
+__________ ___________   _____    ____ ___
+\______   \\_   _____/  /  _  \  |    |   \
+ |    |  _/ |    __)_  /  /_\  \ |    |   /
+ |    |   \ |        \/    |    \|    |  /
+ |______  //_______  /\____|__  /|______/ (os 2026)
+        \/         \/         \/
+
 ```
 
-SIMA is a compact ARM64 hypervisor bring-up project for QEMU `virt` and rk356x
+BEAU is a compact ARM64 hypervisor bring-up project for QEMU `virt` and rk356x
 hardware. It runs at EL2 and focuses on a small, readable virtualization base
 for mixed RTOS and Linux guests.
 
 ```text
 ┌──────────────────────────────┐
-│ SIMA Hypervisor · ARM64 EL2  │
+│ BEAU Hypervisor · ARM64 EL2  │
 ├──────────────┬───────────────┤
 │ VM0 Zephyr   │ service VM    │
 │ VM1 LK       │ prelaunch VM  │
@@ -35,13 +37,13 @@ for mixed RTOS and Linux guests.
 | Interrupts | SGI/PPI/SPI routing, timer injection, vGIC maintenance handling |
 | Console | vPL011, async VM console buffer, `vsh` guest shell switching |
 | Debug | `vcpus`, `threads`, `schedstat`, `vmap`, `irqstat`, `dumpstat`, `vsh` |
-| Tests | `scripts/regress.py` validates SIMA shell and all guest consoles |
+| Tests | `scripts/regress.py` validates BEAU shell and all guest consoles |
 | Docs | SDK notes, ARM64 assembly comments, concise architecture references |
 
 LK and Zephyr stay as repository-local `.incbin` guest images under
-`sdk/images`. VM2 Linux uses `sdk/images/linux/Image` and `sdk/images/linux/Initrd`, which
-QEMU stages with `-device loader`; SIMA then copies them into the VM2 RAM window.
-The Linux device tree remains repository-local as `sdk/images/linux/sima-linux.dtb`.
+`sdk/image`. VM2 Linux uses `sdk/image/linux/Image` and `sdk/image/linux/Initrd`, which
+QEMU stages with `-device loader`; BEAU then copies them into the VM2 RAM window.
+The Linux device tree remains repository-local as `sdk/image/linux/beau-linux.dtb`.
 
 ```text
 ┌────────────┬────────────┬────────────┬────────────┐
@@ -69,7 +71,7 @@ The Linux device tree remains repository-local as `sdk/images/linux/sima-linux.d
 
 ## Source Base And License
 
-SIMA is based on the Project ACRN hypervisor source tree and keeps ACRN-derived
+BEAU is based on the Project ACRN hypervisor source tree and keeps ACRN-derived
 code under the BSD 3-Clause License.
 
 The ARM64 QEMU porting work is non-Intel work and is marked as
@@ -78,7 +80,7 @@ party components retain their original notices; see `NOTICE.md` and `LICENSES/`.
 
 License-risk summary: no GPL-only source was found. The notable item is libfdt,
 which is dual-licensed `GPL-2.0-or-later OR BSD-2-Clause`; use the BSD-2-Clause
-option when distributing SIMA to avoid GPL copyleft obligations.
+option when distributing BEAU to avoid GPL copyleft obligations.
 
 ---
 

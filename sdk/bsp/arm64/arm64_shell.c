@@ -410,15 +410,13 @@ static void shell_dumpstat_vgic_event(const char *label,
 	if (last->tsc == 0UL) {
 		shell_item_line("%s:none", label);
 	} else {
-		shell_item_line("%s:source:%s count:%u used_lrs:%u tsc:0x%08lx",
+		shell_item_line("%s:src:%s count:%u used_lrs:%u misr:0x%016lx tsc:0x%08lx",
 			label, shell_vgic_source_to_str(last->source),
-			last->count, last->used_lrs, last->tsc);
-		shell_item_line("       misr:0x%016lx eisr:0x%016lx elrsr:0x%016lx",
-			last->misr, last->eisr, last->elrsr);
-		shell_item_line("       hcr:0x%016lx vmcr:0x%016lx ap0r0:0x%016lx ap1r0:0x%016lx",
-			last->hcr, last->vmcr, last->ap0r0, last->ap1r0);
-		shell_item_line("       lr0:0x%016lx lr1:0x%016lx",
-			last->lr0, last->lr1);
+			last->count, last->used_lrs, last->misr, last->tsc);
+		shell_item_line("         hcr:0x%016lx  vmcr:0x%016lx eisr:0x%016lx elrsr:0x%016lx",
+			last->hcr, last->vmcr, last->eisr, last->elrsr);
+		shell_item_line("       ap0r0:0x%016lx ap1r0:0x%016lx  lr0:0x%016lx   lr1:0x%016lx",
+			last->ap0r0, last->ap1r0, last->lr0, last->lr1);
 	}
 }
 
@@ -438,11 +436,11 @@ static void shell_dumpstat_recent_events(const struct arm64_vcpu_debug_info *deb
 		shell_item_line(" exit:none");
 	} else {
 		if (last_exit->ec == ARM64_VCPU_DEBUG_EXIT_EC_INVALID) {
-			shell_item_line(" exit:source:%s ec:N/A status:%d tsc:0x%08lx",
+			shell_item_line(" exit:src:%s ec:N/A status:%d tsc:0x%08lx",
 				shell_exit_source_to_str(last_exit->source),
 				last_exit->status, last_exit->tsc);
 		} else {
-			shell_item_line(" exit:source:%s ec:0x%x status:%d tsc:0x%08lx",
+			shell_item_line(" exit:src:%s ec:0x%x status:%d tsc:0x%08lx",
 				shell_exit_source_to_str(last_exit->source),
 				last_exit->ec, last_exit->status, last_exit->tsc);
 		}
@@ -458,7 +456,7 @@ static void shell_dumpstat_recent_events(const struct arm64_vcpu_debug_info *deb
 	if (last_irq->tsc == 0UL) {
 		shell_item_line("  irq:none");
 	} else {
-		shell_item_line("  irq:virq:%u level:%s source-vcpu:%hu target-vcpu:%hu status:%d tsc:0x%08lx",
+		shell_item_line("  irq:virq:%u level:%s src:%hu dst:%hu status:%d tsc:0x%08lx",
 			last_irq->virq, shell_yes_no(last_irq->level),
 			last_irq->source_vcpu_id, last_irq->target_vcpu_id,
 			last_irq->status, last_irq->tsc);
@@ -478,7 +476,7 @@ static void shell_dumpstat_recent_events(const struct arm64_vcpu_debug_info *deb
 	if (last_sgi->tsc == 0UL) {
 		shell_item_line("  sgi:none");
 	} else {
-		shell_item_line("  sgi:intid:%u source-vcpu:%hu target-mask:0x%04x delivered:0x%04x status:%d tsc:0x%08lx",
+		shell_item_line("  sgi:intid:%u src:%hu dst-mask:0x%04x delivered:0x%04x status:%d tsc:0x%08lx",
 			last_sgi->intid, last_sgi->source_vcpu_id,
 			last_sgi->target_mask, last_sgi->delivered_mask,
 			last_sgi->status, last_sgi->tsc);
@@ -486,9 +484,9 @@ static void shell_dumpstat_recent_events(const struct arm64_vcpu_debug_info *deb
 	}
 
 	if (last_sgi_target->tsc == 0UL) {
-		shell_item_line("sgi-target:none");
+		shell_item_line("sgi-dst:none");
 	} else {
-		shell_item_line("sgi-target:intid:%u source-vcpu:%hu target-vcpu:%hu status:%d request:%s running:%s current:%s tsc:0x%08lx",
+		shell_item_line("sgi-dst:intid:%u src:%hu dst:%hu status:%d request:%s running:%s current:%s tsc:0x%08lx",
 			last_sgi_target->intid, last_sgi_target->source_vcpu_id,
 			last_sgi_target->target_vcpu_id, last_sgi_target->status,
 			shell_yes_no(last_sgi_target->request_pending),
@@ -512,7 +510,7 @@ static void shell_dumpstat_recent_events(const struct arm64_vcpu_debug_info *deb
 	if (last_psci->tsc == 0UL) {
 		shell_item_line(" psci:none");
 	} else {
-		shell_item_line(" psci:fn:0x%x source-vcpu:%hu target-vcpu:%hu ret:%ld tsc:0x%08lx",
+		shell_item_line(" psci:fn:0x%x src:%hu dst:%hu ret:%ld tsc:0x%08lx",
 			last_psci->fn, last_psci->source_vcpu_id,
 			last_psci->target_vcpu_id, last_psci->ret, last_psci->tsc);
 		shell_item_line("      mpidr:0x%016lx entry:0x%016lx context:0x%016lx",
@@ -547,25 +545,25 @@ static void shell_dumpstat_recent_events(const struct arm64_vcpu_debug_info *deb
 		shell_item_line("      cntv_ctl:0x%08x cntv_cval:0x%016lx cntvct:0x%016lx expired:%s",
 			last_wfx->cntv_ctl, last_wfx->cntv_cval, last_wfx->cntvct,
 			shell_yes_no(last_wfx->cntv_expired));
-		shell_item_line("      hcr:0x%016lx misr:0x%016lx ap0r0:0x%016lx ap1r0:0x%016lx",
+		shell_item_line("      hcr:0x%016lx misr:0x%016lx    ap0r0:0x%016lx    ap1r0:0x%016lx",
 			last_wfx->hcr, last_wfx->misr, last_wfx->ap0r0, last_wfx->ap1r0);
-		shell_item_line("      lr0:0x%016lx lr1:0x%016lx live_lr0:0x%016lx live_lr1:0x%016lx",
+		shell_item_line("      lr0:0x%016lx  lr1:0x%016lx live_lr0:0x%016lx live_lr1:0x%016lx",
 			last_wfx->lr0, last_wfx->lr1, last_wfx->live_lr0, last_wfx->live_lr1);
 	}
 
 	if (last_return->tsc == 0UL) {
 		shell_item_line("return:none");
 	} else {
-		shell_item_line("return:source:%s elr:0x%016lx spsr:0x%016lx tsc:0x%08lx",
+		shell_item_line("return:src:%s elr:0x%016lx spsr:0x%016lx tsc:0x%08lx",
 			shell_exit_source_to_str(last_return->source),
 			last_return->elr, last_return->spsr, last_return->tsc);
 		shell_item_line("       cntv_ctl:0x%08x cntv_cval:0x%016lx cntvct:0x%016lx expired:%s",
 			last_return->cntv_ctl, last_return->cntv_cval,
 			last_return->cntvct, shell_yes_no(last_return->cntv_expired));
-		shell_item_line("       hcr:0x%016lx vmcr:0x%016lx misr:0x%016lx eisr:0x%016lx elrsr:0x%016lx",
+		shell_item_line("          hcr:0x%016lx   vmcr:0x%016lx     misr:0x%016lx     eisr:0x%016lx elrsr:0x%016lx",
 			last_return->hcr, last_return->vmcr, last_return->misr,
 			last_return->eisr, last_return->elrsr);
-		shell_item_line("       ap0r0:0x%016lx ap1r0:0x%016lx used_lrs:%u el2_masked:%s",
+		shell_item_line("        ap0r0:0x%016lx  ap1r0:0x%016lx used_lrs:%u el2_masked:%s",
 			last_return->ap0r0, last_return->ap1r0,
 			last_return->used_lrs,
 			shell_yes_no(last_return->cntv_el2_masked));
@@ -903,9 +901,9 @@ static void shell_dumpstat_el1_state(const struct dumpstat_snapshot *snapshot)
 		gctx->vbar_el1, gctx->sp_el0);
 	shell_item_line("       elr_el1:0x%016lx spsr_el1:0x%016lx",
 		gctx->elr_el1, gctx->spsr_el1);
-	shell_item_line("       sctlr:0x%016lx tcr:0x%016lx cntkctl:0x%016lx",
+	shell_item_line("         sctlr:0x%016lx      tcr:0x%016lx cntkctl:0x%016lx",
 		gctx->sctlr_el1, gctx->tcr_el1, gctx->cntkctl_el1);
-	shell_item_line("       ttbr0:0x%016lx ttbr1:0x%016lx",
+	shell_item_line("         ttbr0:0x%016lx    ttbr1:0x%016lx",
 		gctx->ttbr0_el1, gctx->ttbr1_el1);
 	if (snapshot->captured) {
 		shell_item_line("  live:vbar:0x%016lx sp_el0:0x%016lx",
@@ -935,12 +933,13 @@ static void shell_dumpstat_timer_state(const struct dumpstat_snapshot *snapshot)
 		uint64_t guest_now = snapshot->live_cntvct_el0;
 		const struct arm64_gicv3_local_irq_state *host_irq = &snapshot->host_timer_irq;
 
-		shell_item_line("  live:cnthctl:0x%016lx cntvct:0x%016lx",
-			snapshot->live_cnthctl_el2, snapshot->live_cntvct_el0);
-		shell_item_line("       cntpct:0x%016lx cntvoff:0x%016lx guest_now:0x%016lx",
-			snapshot->live_cntpct_el0, snapshot->live_cntvoff_el2, guest_now);
-		shell_item_line("       cntv_ctl:0x%08x cntv_cval:0x%016lx guest_delta:%ld",
-			snapshot->live_cntv_ctl_el0, snapshot->live_cntv_cval_el0,
+		shell_item_line("  live:cnthctl:0x%016lx cntvct:0x%016lx cntpct:0x%016lx",
+			snapshot->live_cnthctl_el2, snapshot->live_cntvct_el0,
+			snapshot->live_cntpct_el0);
+		shell_item_line("       cntvoff:0x%016lx cntv_ctl:0x%08x cntv_cval:0x%016lx",
+			snapshot->live_cntvoff_el2, snapshot->live_cntv_ctl_el0,
+			snapshot->live_cntv_cval_el0);
+		shell_item_line("       guest_delta:%ld",
 			(int64_t)(snapshot->live_cntv_cval_el0 - guest_now));
 		if (host_irq->valid) {
 			shell_item_line("       host_gic:intid:%u en:%s pend:%s act:%s group:%s prio:0x%02x",
@@ -1021,7 +1020,7 @@ static void shell_dumpstat_local_irqs(const struct dumpstat_snapshot *snapshot)
 				sgi_active |= bit;
 			}
 		}
-		if (irq->pending || irq->active || ((idx < ARM64_VGIC_SGI_NUM) && irq->enabled)) {
+		if (irq->pending || irq->active || (idx == DUMPSTAT_VTIMER_VIRQ)) {
 			shell_item_line("local:virq:%2u enabled:%s pending:%s active:%s level:%s",
 				irq->virq, shell_yes_no(irq->enabled),
 				shell_yes_no(irq->pending), shell_yes_no(irq->active),

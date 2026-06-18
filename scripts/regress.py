@@ -418,7 +418,8 @@ def run_qemu(args, cmd):
                 "+0x",
             ],
             ["depth:", "vcpu saved stack", "vcpu vm stack", "host stack source:", "fp   0x",
-             "live pcpu sample timed out"],
+             "live pcpu sample timed out", "source:", "source-vcpu:", "target-vcpu:",
+             "target-mask:"],
         )
 
         qemu.send("vsh 0" + ENTER)

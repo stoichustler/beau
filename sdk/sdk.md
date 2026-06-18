@@ -494,8 +494,9 @@ Status as of 2026-06-18:
   slower and must not be treated as the starting point for future work.
 - `dumpstat` no longer includes the Linux CSD wait probe or any direct
   `call_single_data_t` parser. Keep `dumpstat` focused on generic vCPU state,
-  EL1 state, timer/vGIC state, vtimer trace, SGI target state, local IRQ state,
-  and raw guest/host stacks.
+  EL1 state, timer/vGIC state, vtimer trace, SGI dst state, compact local IRQ
+  state, and raw guest/host stacks. `dumpstat` output uses `src`/`dst` labels
+  instead of `source`/`target` labels.
 - Development hygiene: avoid broad, low-signal local `rg` searches over large
   source trees. Prefer known relevant files in this repository and targeted
   reads from explicitly named external references, such as the Linux 7.1 source

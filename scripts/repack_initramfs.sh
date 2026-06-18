@@ -45,7 +45,7 @@ mount -t devpts devpts /dev/pts 2>/dev/null || true
 alias ll='ls -la'
 
 TERM=dumb
-PS1='uos \w '
+PS1='\[\033[0;92m\]uos \w\[\033[0m\] '
 
 export PS1 PATH TERM
 

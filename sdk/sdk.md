@@ -431,6 +431,57 @@ Status as of 2026-06-17:
   the intended trap configuration. In that case, fixes must sample live CNTV
   state at real EL2 boundaries instead of relying only on `handle_timer_sysreg()`.
 
+### VM2 Linux RCU Stall Progress, 2026-06-18
+
+- Latest VM2 dumps show improvement from the earlier lost-LR symptom: vCPU0
+  still stops around Linux `cpu_do_idle()` return, but the virtual timer LR is
+  visible as pending-only, for example `live_lr0:0x508000000000001b` for
+  virtual INTID 27. The remaining stall is therefore no longer primarily "timer
+  LR disappeared"; it is a forward-progress window after WFI wakeup.
+- Symbolication for the active VM2 Linux image maps runtime
+  `0xffff800080f0fe4c` to `cpu_do_idle+8`, the instruction after WFI and before
+  `arch_cpu_idle()` returns toward `default_idle_call()`. Linux reaches this
+  point with PSTATE.I still set, then must execute a few more instructions and
+  reach `local_irq_enable()`/`daifclr` before the pending timer IRQ can be
+  handled normally.
+- Representative dump state for the remaining failure:
+  - vCPU0 `elr:0xffff800080f0fe4c`, `lr:0xffff800080f0fe60`,
+    `spsr:0x600000c5`, and live `DAIF` IRQ masked.
+  - virtual timer virq 27 is enabled and pending in the vGIC, active is clear,
+    and `cntv_el2_masked:yes`.
+  - the vtimer trace repeatedly shows pending-only timer LR preservation rather
+    than total loss of the timer interrupt.
+  - some failing captures report `wfx:none`, meaning the observed stall can
+    occur on the normal physical IRQ return path, not only inside the trapped
+    WFI diagnostic path.
+- Current local fix is limited to `arch/arm64/guest/vcpu_exit.c`:
+  - `handle_wfx()` no longer yields WFI when a virtual IRQ is already pending,
+    even if the saved guest PSTATE still masks IRQs.
+  - the sync-trap and physical-IRQ return paths now refresh the current vtimer
+    and vGIC state before honoring host `need_reschedule()`.
+  - if a pending guest IRQ is visible after that refresh, the return path skips
+    the host reschedule once and returns to EL1 so Linux can leave the idle path
+    and unmask interrupts.
+- This fix intentionally does not modify `core/` scheduler/timer/vCPU code and
+  does not modify `sdk/images/linux/sima-linux.dts`.
+- Automated validation completed for the local fix:
+  `git diff --check -- arch/arm64/guest/vcpu_exit.c` passed, and the QEMU SIMA
+  image rebuilt successfully with:
+
+  ```bash
+  SIMA_TOOLCHAINS=/home/beau/sima-cc/bin \
+  PATH=/home/beau/sima-cc/bin:$PATH \
+  make ARCH=arm64 PLATFORM=qemu CROSS_COMPILE=aarch64-none-elf- -j$(nproc)
+  ```
+
+  Updated outputs are `out/qemu_out/sima.debug.out` and
+  `out/qemu_out/sima.debug.bin`.
+- Manual validation is still pending. The next run should rebuild/boot the
+  updated image, enter VM2 Linux as `root` / `root`, keep the 4-vCPU guest
+  running past the previous RCU stall window, and confirm that vCPU0 no longer
+  remains at `cpu_do_idle+8` with virq 27 pending. If the stall still appears,
+  capture `dumpstat 2`, `vcpus`, `schedstat`, and `irqstat` immediately.
+
 ### RCU Stall Repair Strategy
 
 1. Preserve the fast root-console baseline first. Before any VM2 RCU experiment,

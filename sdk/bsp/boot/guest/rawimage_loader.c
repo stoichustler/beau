@@ -85,6 +85,21 @@ static int32_t load_rawimage(struct acrn_vm *vm)
 	uint32_t ramdisk_size = ramdisk_info->size;
 	int32_t ret;
 
+	/*
+	 * Raw-image startup is the active ARM64 path:
+	 *
+	 *   vm_config load addresses
+	 *        -> range checks against the configured guest RAM window
+	 *        -> optional FDT placement inside the same RAM window
+	 *        -> copy kernel/initramfs from boot modules to guest GPAs
+	 *        -> record kernel_entry_addr for arch_vm_prepare_bsp()
+	 *
+	 * Stage-2 mappings are already created before this loader runs, so
+	 * copy_to_gpa() validates that every destination GPA is backed by the VM's
+	 * configured RAM. On current ARM64 platforms that RAM is identity-mapped,
+	 * but this loader still reasons in guest GPAs.
+	 */
+
 	/* TODO: GPA 0 load support */
 	kernel_load_gpa = vm_config->os_config.kernel_load_addr;
 #if defined(CONFIG_ARM64)
@@ -128,6 +143,11 @@ static int32_t load_rawimage(struct acrn_vm *vm)
 		uint64_t fdt_load_gpa = arm64_rawimage_fdt_load_gpa(vm, kernel_load_gpa,
 			sw_kernel->kernel_size, ramdisk_load_gpa, ramdisk_size);
 
+		/*
+		 * The FDT is part of the guest boot ABI, not a separate mapped device.
+		 * Keep it in normal guest RAM and away from raw image payloads so the
+		 * initial ARM64 register state can pass its GPA directly to EL1.
+		 */
 		if (fdt_load_gpa == 0UL) {
 			pr_err("vm-%u fdt does not fit guest ram without overlapping raw image",
 				vm->vm_id);

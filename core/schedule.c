@@ -337,6 +337,15 @@ bool sched_clear_reschedule_if_current_only(uint16_t pcpu_id)
 	uint64_t rflag;
 	bool cleared = false;
 
+	/*
+	 * Architecture code uses this only for forward-progress windows where a
+	 * pending guest interrupt is already resident in the current vCPU state.
+	 * If the current thread is the only runnable non-idle object, schedule()
+	 * would select it again after clearing NEED_RESCHEDULE; doing that under
+	 * the scheduler lock avoids consuming a bounded guest IRQ rescue window on
+	 * a no-op tick. Shared pCPU fairness is preserved because the helper fails
+	 * as soon as any other runnable object exists.
+	 */
 	obtain_schedule_lock(pcpu_id, &rflag);
 	if (bitmap_test(NEED_RESCHEDULE, &ctl->flags) &&
 		sched_current_is_only_runnable_locked(ctl)) {

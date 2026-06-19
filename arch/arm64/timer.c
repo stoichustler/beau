@@ -41,6 +41,11 @@ void arch_init_timer(void)
 	 * global descriptor, but every pCPU has its own enable bit and comparator.
 	 * Install the common handler on the BSP once, then enable and stop the
 	 * local PPI on every pCPU as it initializes.
+	 *
+	 * Guest timer delivery is intentionally separate: VGICv3 uses the hardware
+	 * virtual timer/CNTV path and injects the guest-visible timer PPI. Do not
+	 * reuse CNTP for guest deadlines, or the host scheduler loses its tick
+	 * source.
 	 */
 	acrn_irq = arm64_domain_get_acrn_irq(ARM64_IRQD_GIC, ARM64_GIC_PPI_PHYSICAL_TIMER);
 	if (get_pcpu_id() == BSP_CPU_ID) {

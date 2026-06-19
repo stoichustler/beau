@@ -388,6 +388,11 @@ static void gits_init(void)
 		return;
 	}
 
+	/*
+	 * BEAU does not currently pass the physical ITS through to guests. The
+	 * host leaves a present ITS quiescent so QEMU's device exists without
+	 * delivering physical LPIs behind the software vITS model exposed to VM2.
+	 */
 	gits_write32(GITS_CTLR, 0U);
 	for (retries = GIC_WAIT_RETRIES; retries > 0U; retries--) {
 		ctlr = gits_read32(GITS_CTLR);
@@ -587,6 +592,13 @@ void arm64_gicv3_set_irq_priority(uint32_t intid, uint8_t priority)
 	uint64_t rdist;
 
 	if (intid < GIC_SPI_BASE) {
+		/*
+		 * Local SGI/PPI priority is per-redistributor. VGICv3 uses this
+		 * for the virtual-timer host mask: PPI27 remains enabled so CNTV
+		 * stays architecturally visible, but priority 0xff keeps EL2 from
+		 * repeatedly taking the host interrupt while a timer LR owns guest
+		 * delivery.
+		 */
 		rdist = gic_current_rdist();
 		gicr_set_priority(rdist, intid, priority);
 	} else if (gic_is_programmable_spi(intid)) {

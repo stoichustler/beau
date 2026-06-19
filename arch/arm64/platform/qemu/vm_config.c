@@ -32,6 +32,14 @@ extern const uint8_t qemu_beau_linux_dtb_size[];
  * Guest RAM windows are split and mapped with GPA/IPA == HPA. That keeps the
  * raw-image boot path simple and avoids firmware-discovered memory while
  * future VM2/VM3 entries can be added by extending this scenario table.
+ *
+ * The identity-map contract is expressed twice:
+ * - memory.host_regions[] names the host physical RAM window owned by the VM;
+ * - arch.guest_ram_start and arch.guest_ram_hpa use the same base address.
+ *
+ * arch/arm64/guest/vm.c validates those two bases and passes them unchanged to
+ * the stage-2 page-table builder. If a future QEMU scenario needs non-identity
+ * RAM, change that design first instead of silently changing only this table.
  */
 static struct vm_hpa_regions zephyr_memory_regions[] = {
 	{

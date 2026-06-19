@@ -14,6 +14,14 @@
 
 static struct acrn_boot_info acrn_bi = { 0 };
 
+/*
+ * acrn_boot_info is the normalized handoff from the host boot environment to
+ * VM loading. Multiboot, Multiboot2, and bare boot all feed the same structure:
+ * module source addresses, module tags, bootloader command line, memory map,
+ * and optional EFI/ACPI pointers. Per-VM loading code should consume this
+ * normalized view instead of reading bootloader-specific records directly.
+ */
+
 /**
  * @pre (p_start != NULL) && (p_end != NULL)
  */
@@ -38,6 +46,12 @@ void get_boot_mods_range(uint64_t *p_start, uint64_t *p_end)
 void init_acrn_boot_info(uint32_t *registers)
 {
 	int32_t ret;
+
+	/*
+	 * Prefer a real bootloader protocol when present. ARM64 QEMU/rk356x static
+	 * builds can also run without Multiboot, so bare boot falls back to the
+	 * platform-compiled module table from vm_config.c.
+	 */
 	ret = init_multiboot_info(registers);
 	if (ret < 0) {
 		init_bare_boot_info();
@@ -48,6 +62,11 @@ int32_t sanitize_acrn_boot_info(struct acrn_boot_info *abi)
 {
 	int32_t abi_status = 0;
 
+	/*
+	 * VM launch depends on both modules and a memory map. The modules provide
+	 * guest images and firmware payloads; the memory map feeds legacy x86
+	 * loaders and still documents host boot ownership for diagnostics.
+	 */
 	if (abi->mods_count == 0U) {
 		pr_err("no boot module info found");
 		abi_status = -EINVAL;

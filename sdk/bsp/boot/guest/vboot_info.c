@@ -24,6 +24,19 @@
 
 #define DBG_LEVEL_BOOT	6U
 
+/*
+ * Per-VM boot-info setup is a metadata pass, not the image-copy pass:
+ *
+ *   acrn_boot_info modules + vm_config tags
+ *        -> vm->sw.kernel_info / ramdisk_info / acpi_info / fdt_info
+ *        -> vm->sw.bootargs_info
+ *        -> prepare_os_image() selects and runs the real loader
+ *
+ * This split lets the common VM launch path create vCPUs and stage-2 mappings
+ * before touching guest RAM. The module source pointers remain host addresses;
+ * load addresses are guest GPAs used later by copy_to_gpa().
+ */
+
 /**
  * @pre vm != NULL && mod != NULL
  */
@@ -70,6 +83,11 @@ static int32_t init_vm_kernel_info(struct acrn_vm *vm, const struct abi_module *
 
 	vm->sw.kernel_type = vm_config->os_config.kernel_type;
 	if ((mod->start != NULL) && (mod->size != 0U)) {
+		/*
+		 * Only record the source image here. Raw-image, bzImage, and ELF
+		 * loaders interpret the same bytes differently and choose the final
+		 * guest load/entry state in prepare_os_image().
+		 */
 		vm->sw.kernel_info.kernel_src_addr = mod->start;
 		vm->sw.kernel_info.kernel_size = mod->size;
 		if ((vm->sw.kernel_type > 0) && (vm->sw.kernel_type < KERNEL_UNKNOWN)) {
@@ -92,6 +110,14 @@ static void init_vm_bootargs_info(struct acrn_vm *vm, const struct acrn_boot_inf
 {
 	struct acrn_vm_config *vm_config = get_vm_config(vm->vm_id);
 
+	/*
+	 * Bootargs are selected in priority order:
+	 * - VM configuration is the default,
+	 * - a kernel module tag suffix can override per-VM bootargs,
+	 * - Service VM can append the bootloader command line.
+	 *
+	 * ARM64 QEMU VM2 normally uses the configured bootargs from vm_config.c.
+	 */
 	vm->sw.bootargs_info.src_addr = vm_config->os_config.bootargs;
 	/* If module string of the kernel module exists, it would OVERRIDE the pre-configured build-in VM bootargs,
 	 * which means we give user a chance to re-configure VM bootargs at bootloader runtime. e.g. GRUB menu
@@ -183,7 +209,11 @@ static int32_t init_vm_sw_load(struct acrn_vm *vm, const struct acrn_boot_info *
 
 	/* dev_dbg(DBG_LEVEL_BOOT, "mod counts=%d\n", abi->mods_count); */
 
-	/* find kernel module first */
+	/*
+	 * Find the kernel first because the kernel module may carry an optional
+	 * command-line suffix after its tag. Other modules are meaningful only
+	 * once the VM has a supported kernel type.
+	 */
 	mod = get_mod_by_tag(abi, vm_config->os_config.kernel_mod_tag);
 	if (mod != NULL) {
 		const char *string = (char *)hpa2hva((uint64_t)mod->string);
@@ -203,7 +233,12 @@ static int32_t init_vm_sw_load(struct acrn_vm *vm, const struct acrn_boot_info *
 	if (ret == 0) {
 		init_vm_bootargs_info(vm, abi);
 
-		/* check whether there is a ramdisk module */
+		/*
+		 * Optional payloads are discovered by configured tags. For ARM64 raw
+		 * Linux, Image and Initramfs are staged as boot modules while the
+		 * Linux-on-BEAU DTB is either a module or synthetic vFDT depending on
+		 * VM flags.
+		 */
 		mod = get_mod_by_tag(abi, vm_config->os_config.ramdisk_mod_tag);
 		if (mod != NULL) {
 			init_vm_ramdisk_info(vm, mod);
@@ -254,6 +289,12 @@ int32_t init_vm_boot_info(struct acrn_vm *vm)
 	struct acrn_boot_info *abi = get_acrn_boot_info();
 	int32_t ret = -EINVAL;
 
+	/*
+	 * Boot modules may live in memory described by the bootloader or static
+	 * platform table. pre_user_access()/post_user_access() brackets this read
+	 * side so later loader code can safely copy from recorded source HVAs into
+	 * the VM's guest RAM.
+	 */
 	pre_user_access();
 	ret = init_vm_sw_load(vm, abi);
 	post_user_access();

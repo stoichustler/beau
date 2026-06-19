@@ -480,6 +480,233 @@ For the current VM2 issue, key failure indicators are Linux messages containing
 `elr:0xffff800080f0fe4c`, virtual timer `virq:27` pending, and a pending-only
 timer LR such as `0x508000000000001b`.
 
+## ARM64 vtimer/vIRQ/vGICv3/GICv3 Handoff Notes
+
+This section is written for engineers taking over the ARM64 interrupt/timer
+path. It describes the intended design flow rather than only the current bug
+state. Keep it synchronized with `arch/arm64/gicv3.c`,
+`arch/arm64/timer.c`, `arch/arm64/guest/virq.c`,
+`arch/arm64/guest/vgicv3.c`, `include/arch/arm64/asm/guest/vgicv3.h`, and the
+guest-exit path.
+
+### Architecture Map
+
+- Physical GICv3 host layer:
+  `arch/arm64/gicv3.c` initializes the real Distributor, Redistributors, ITS
+  quiesce state, and CPU interface. It owns physical INTIDs, priorities,
+  enable bits, SGI send, ACK/EOI, and local SGI/PPI state used by `irqstat`.
+- Host physical timer layer:
+  `arch/arm64/timer.c` uses CNTP/physical timer PPI30 as the EL2 scheduler
+  tick. Guest timer work must not steal CNTP, because CNTP is the host
+  preemption and softirq source.
+- Virtual interrupt API:
+  `arch/arm64/guest/virq.c` is the small architecture-facing entry point used
+  by common code and devices. For GIC INTIDs it delegates to VGICv3; the
+  bitmap fallback is legacy/request plumbing for non-GIC virtual events.
+- Virtual GICv3/vITS model:
+  `arch/arm64/guest/vgicv3.c` owns guest-visible GICD/GICR/GITS MMIO,
+  ICC_* sysreg traps, software IRQ descriptors, pending bitmaps, hardware
+  list-register save/load/sync/flush, virtual SGI delivery, vtimer PPI
+  delivery, and VM2-only ITS/LPI modeling.
+- Core scheduler boundary:
+  `core/schedule.c` knows threads, runqueues, ticks, and reschedule flags. It
+  does not know GIC LR semantics. ARM64 code may ask for the narrow
+  `sched_clear_reschedule_if_current_only()` helper when returning to the same
+  guest is required to retire a pending virtual IRQ, but the scheduler must not
+  grow architecture-specific timer logic.
+
+### Interrupt Numbering
+
+- ARM GIC INTIDs are guest-visible interrupt numbers:
+  SGI0-SGI15, PPI16-PPI31, SPI32 and above, and LPIs from 8192.
+- BEAU maps GIC INTIDs into the generic ACRN IRQ namespace through the ARM64
+  IRQ domain. Do not pass raw GIC INTIDs to common IRQ APIs without this
+  domain conversion.
+- Current important physical INTIDs:
+  - SGI0: EL2 SMP/reschedule call.
+  - PPI25: vGIC maintenance interrupt.
+  - PPI27: ARM virtual timer. Used as the hardware source for guest timer
+    delivery while a vCPU is loaded.
+  - PPI30: ARM physical timer. Reserved for the EL2 scheduler tick.
+- Current guest timer ABI:
+  - Linux VM2 uses virtual timer PPI/INTID 27 from DTS `<1 13 4>`.
+  - RTOS guests may expect physical-timer PPI30 as their guest-visible timer
+    PPI. BEAU still backs the loaded guest with hardware CNTV and translates
+    the event back to `timer_virq`.
+
+### Physical GICv3 Flow
+
+1. `arm64_gicv3_init_early()` discovers Redistributor frames by matching
+   `GICR_TYPER` affinity to per-pCPU MPIDR. Do not assume Redistributor frame
+   order equals logical pCPU order.
+2. The Distributor is reset into non-secure Group-1, affinity-routing mode.
+   SPIs are disabled, pending/active state is cleared, priorities are set to
+   `0x80`, and routes default to BSP until a richer routing policy exists.
+3. The QEMU ITS is detected and quiesced, but physical ITS passthrough is not
+   currently exposed. VM2 receives a software vITS model instead.
+4. Every pCPU initializes its Redistributor and CPU interface. Local host
+   enables include SGI0, PPI25, and PPI27. PPI30 is enabled by the host timer
+   init path.
+5. Host priority masking is used for the virtual timer rescue path: while a
+   virtual timer LR owns guest delivery, PPI27 stays enabled but priority is
+   dropped to `0xff` so the host does not repeatedly take PPI27. Do not disable
+   PPI27 at the Redistributor as a replacement for this, because the QEMU CPU
+   model can then make Linux-visible CNTV ISTATUS unreliable.
+
+### vIRQ API Flow
+
+The ARM64 vIRQ API deliberately stays thin:
+
+1. Device or common code calls `vcpu_set_intr(vcpu, hwirq)` or
+   `vcpu_clear_intr(vcpu, hwirq)`.
+2. If `hwirq < ARM64_VGIC_IRQ_NUM`, the request is a guest GIC INTID and is
+   routed to `arm64_vgicv3_inject_irq()` or `arm64_vgicv3_clear_irq()`.
+3. VGICv3 syncs any current LR state before mutating the software descriptor,
+   updates pending/active state, flushes into hardware LRs if the target vCPU
+   is loaded, and signals `ARM64_VCPU_EVENT_VIRTUAL_INTERRUPT`.
+4. The vCPU request/event path wakes blocked vCPUs and makes the guest-return
+   path revisit pending interrupt work before entering EL1.
+5. Keep device-specific level semantics in the device backend. For example
+   vPL011 should assert/deassert based on UART interrupt line state; VGICv3
+   should model that line, not infer UART FIFO state itself.
+
+### VGICv3 Lifecycle
+
+The vGIC model has two copies of interrupt state:
+
+- Software descriptors and bitmaps:
+  guest-visible enable, pending, active, priority, level/edge, target vCPU, and
+  LPI mappings. These are persistent across scheduler switches.
+- Hardware list registers:
+  transient GICv3 slots that present virtual IRQs to the currently loaded EL1
+  vCPU. LRs must be saved/restored on vCPU switch and synchronized on
+  maintenance IRQs, MMIO/sysreg traps, and selected guest-exit paths.
+
+Normal flow:
+
+1. Guest GICD/GICR/GITS MMIO or ICC_* sysreg access traps to EL2.
+2. VGICv3 takes the VM vGIC lock, syncs live LR state if needed, and emulates
+   the register access against software descriptors.
+3. If a pending, enabled IRQ is deliverable, flush writes it into an LR.
+4. Guest IAR/EOIR executes through the virtual CPU interface. Hardware reports
+   completion through EISR/EOIcount or active-priority state.
+5. Sync consumes that hardware evidence and updates descriptor pending/active
+   state.
+6. Level interrupts remain pending while their source line is high. Edge
+   interrupts are delivery credits and are normally consumed after LR
+   materialization, except SGI pending-only wake cases that must wait for EOI
+   evidence.
+
+Important rules:
+
+- Do not clear an edge SGI only because a pending-only LR disappeared. Linux
+  can wake from WFI with PSTATE.I masked, and the SGI handler may not run until
+  after `local_irq_enable()`.
+- Do not mark every pending-only timer LR as EOI-maintained. That produced
+  maintenance storms because a still-high CNTV level source immediately rebuilt
+  the same LR.
+- Do not manufacture Active+Pending for the vtimer rescue path. That can model
+  an interrupt acknowledgement that EL1 has not actually performed.
+- GICD/GICR MMIO windows must stay vio/MMIO, not stage-2 RAM mappings. A
+  stage-2 data abort is the intended dispatch path for guest
+  interrupt-controller register access.
+
+### vtimer Lifecycle
+
+BEAU separates host timekeeping from guest timer ABI:
+
+1. Host scheduler tick:
+   CNTP/PPI30 drives `SOFTIRQ_TIMER` and IORR scheduling. It is local to each
+   pCPU and must remain owned by EL2.
+2. Loaded guest timer:
+   Hardware CNTV is loaded with the guest vCPU timer state. When CNTV expires,
+   physical PPI27 arrives at EL2 and `arm64_vgicv3_virtual_timer_irq_handler()`
+   injects the guest-visible `timer_virq`.
+3. Guest-visible PPI:
+   `timer_virq` records the guest ABI. Linux currently sees INTID 27. Some RTOS
+   paths may use INTID 30 as the guest-visible timer even though BEAU still uses
+   hardware CNTV underneath while the vCPU is loaded.
+4. Host masking:
+   After CNTV expires and a timer LR is in flight, BEAU masks the host PPI27 by
+   priority only and keeps guest CNTV shadow state separate. Linux must still
+   be able to observe an architecturally expired timer.
+5. Reprogram/EOI:
+   When the guest moves CVAL to the future, masks/disables CNTV, or EOIs a
+   timer LR, VGICv3 samples live CNTV and lowers or keeps the software level
+   line accordingly.
+6. Offline/shared-pCPU backup:
+   If a vCPU is switched out with a future timer deadline, VGICv3 can arm a
+   host backup timer. The backup injects the same guest timer PPI only if the
+   vCPU is still offline and the deadline is due.
+7. Stuck rescue:
+   The VM2 Linux stress issue centered on pending-only timer LRs around WFI.
+   The accepted narrow model preserves the pending-only LR, keeps PPI27 enabled
+   with low host priority, and gives Linux a bounded EL1 run window to leave
+   WFI and reach `daifclr`/`local_irq_enable()`.
+
+### Scheduler Interaction
+
+The scheduler should remain architecture-neutral:
+
+- `make_reschedule_request()` records a request and uses SGI0 only when the
+  target pCPU is remote.
+- `need_reschedule()` is a flag check, not a promise that another thread will
+  be selected.
+- `sched_clear_reschedule_if_current_only()` is intentionally narrow. ARM64 can
+  call it before a guest return when the current non-idle object is the only
+  runnable object on that pCPU. It clears a no-op tick request that would have
+  selected the same vCPU and consumed a pending timer rescue window.
+- Shared pCPUs still fall back to IORR fairness. Do not replace IORR or disable
+  scheduler ticks to hide vtimer bugs.
+
+### Debugging Checklist
+
+When a guest appears stuck around timer or interrupt delivery, capture:
+
+```text
+vcpus
+schedstat
+irqstat
+constat 2
+dumpstat 2
+```
+
+Read the dump in this order:
+
+1. Confirm the target vCPU is running on the expected pCPU and is not offline.
+2. Check `elr`, `spsr`, and DAIF. If IRQs are masked after WFI, a pending LR may
+   be waiting for Linux to run a few more instructions before it can be handled.
+3. Check `timer_virq`, CNTV_CTL/CVAL/CNTVCT, `cntv_el2_masked`, and whether the
+   deadline is expired.
+4. Check LR0/LR1 and software descriptor state for the same INTID:
+   pending-only, active, active+pending, enabled, pending bitmap.
+5. Check host PPI27 enabled/pending/active/priority. Expected rescue state keeps
+   PPI27 enabled with low priority, not disabled.
+6. Check `rescue:... lr:<yes|no> budget:N`. A repeatedly exhausted budget means
+   the guest is not reaching the normal timer handler window.
+7. For SGI/SMP stalls, compare source and target SGI debug fields. A delivered
+   SGI with no EOI evidence and Linux stuck in a CSD wait usually points to an
+   edge lifecycle issue, not a timer issue.
+8. If `constat 2` shows empty host input backlog, empty vUART RX, and no PL011
+   SPI33 pending, do not chase console input first; continue with vtimer/vGIC
+   state.
+
+### Safe Change Process
+
+1. Preserve the current standard QEMU root-console baseline before each
+   interrupt/timer experiment.
+2. Do not change `sdk/image/linux/beau-linux.dts` unless the task explicitly
+   approves a DTS change.
+3. Keep vtimer fixes in bounded sync points: vCPU switch-in/out,
+   maintenance/EOI handling, timer IRQ injection, explicit sysreg/MMIO traps,
+   or guest exits. Avoid always-on polling and broad backup timers unless a
+   reviewed design proves they are needed.
+4. Add comments in English at the ownership boundary being changed: physical
+   GIC, vIRQ API, VGIC descriptor/LR sync, guest timer shadow state, or core
+   scheduler helper.
+5. Validate both the standard smoke path and the held-Enter/vsh-switch pressure
+   path before treating a timer/vGIC change as accepted.
+
 ## VM2 Linux Debug Snapshot
 
 Status as of 2026-06-18:

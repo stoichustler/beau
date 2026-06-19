@@ -288,6 +288,12 @@ int32_t elf_loader(struct acrn_vm *vm)
 	uint64_t load_params_gpa = find_space_from_ve820(vm, sizeof(struct elf_boot_para),
 				   MEM_4K, VIRT_RSDP_ADDR);
 
+	/*
+	 * ELF is the legacy generic loader path. It copies PT_LOAD segments to
+	 * their program-header GPAs and optionally builds a Multiboot handoff
+	 * block. ARM64 QEMU currently uses raw images instead, so keep ARM64 boot
+	 * analysis focused on rawimage_loader unless a VM explicitly selects ELF.
+	 */
 	if (load_params_gpa != INVALID_GPA) {
 		/* We boot ELF Image from protected mode directly */
 		init_vcpu_protect_mode_regs(vcpu, load_params_gpa +

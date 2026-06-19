@@ -5,9 +5,15 @@
  */
 
 /**
- * Bare boot mode is useful when we run on platforms that
- * does not support multiboot. Bare boot allows you to pre-configure
- * ACRN boot components in compile time.
+ * Bare boot mode is useful when we run on platforms that do not support
+ * Multiboot. Bare boot allows ACRN boot components to be pre-configured at
+ * compile time.
+ *
+ * ARM64 static platforms use this path for the SDK bring-up flow: vm_config.c
+ * provides a bare_boot_options[] table whose tags match VM kernel, ramdisk, and
+ * FDT module tags. init_bare_boot_info() turns that table into the same
+ * acrn_boot_info module list that Multiboot would have produced, so the later
+ * per-VM loader code does not care which boot source was used.
  */
 
 #include <types.h>
@@ -70,6 +76,11 @@ int32_t init_bare_boot_info()
 	options = bare_boot_options;
 	nmods = n_bare_boot_options;
 
+	/*
+	 * The bare module table is trusted platform configuration, but the common
+	 * boot ABI has a fixed module capacity. Clamp here so later module tag
+	 * searches can iterate abi->mods_count without knowing the source table.
+	 */
 	if (nmods > MAX_MODULE_NUM) {
 		pr_err("bareboot: too many boot modules (%d found)", nmods);
 		pr_err("bareboot: accepting only %d, ignoring rest", MAX_MODULE_NUM);
@@ -78,6 +89,11 @@ int32_t init_bare_boot_info()
 
 	abi->mods_count = nmods;
 
+	/*
+	 * Module addresses are stored as HVAs, matching the Multiboot conversion
+	 * path. Loader code then copies from these source addresses into guest GPA
+	 * destinations selected by VM configuration and image format.
+	 */
 	for (i = 0; i < nmods; i++) {
 		m = &(abi->mods[i]);
 		m->start = get_mod_addr(i);

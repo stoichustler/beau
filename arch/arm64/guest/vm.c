@@ -77,6 +77,9 @@ static inline uint64_t stage2_leaf_desc_type(enum _page_table_level level)
  * Stage-2 descriptors use the ARM S2AP and memory-attribute encoding, which
  * differs from EL2 stage-1 descriptors. The common walker handles allocation
  * and splitting; this callback supplies the ARM64-specific leaf descriptor.
+ * In stage-2 calls, the walker's "virtual address" argument is the guest IPA
+ * and the "physical address" argument is the host PA stored into the stage-2
+ * output-address field.
  */
 static void stage2_set_pgentry(uint64_t *pte, uint64_t page, uint64_t prot,
 	enum _page_table_level level, bool is_leaf, const struct pgtable *table)
@@ -153,6 +156,16 @@ static void init_stage2_identity_map(struct acrn_vm *vm)
 	 * The current QEMU layout gives each guest a simple RAM IPA window. KISS:
 	 * map guest-visible IPA to the same physical address and leave device
 	 * windows unmapped so they trap into vio emulation.
+	 *
+	 * The platform contract is:
+	 *   guest_ram_start = first guest IPA/GPA
+	 *   guest_ram_hpa   = first host physical address
+	 *   guest_ram_size  = mapped byte length
+	 *
+	 * validate_stage2_ram_identity() enforces guest_ram_hpa == guest_ram_start.
+	 * Therefore the common walker call below receives identical HPA and IPA
+	 * bases and emits stage-2 block/page descriptors whose output address is
+	 * the same number the guest uses as its IPA. That is the VM RAM 1:1 map.
 	 */
 	pgtable_add_map((uint64_t *)vm->root_stg2ptp, mem_hpa, mem_start,
 		mem_size, PAGE_S2_ATTR_NORMAL | PAGE_BLOCK_DESC, &vm->stg2_pgtable);

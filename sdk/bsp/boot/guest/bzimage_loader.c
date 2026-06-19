@@ -411,6 +411,12 @@ int32_t bzimage_loader(struct acrn_vm *vm)
 	struct acrn_vcpu *vcpu = vcpu_from_vid(vm, BSP_CPU_ID);
 	uint64_t load_params_gpa = find_space_from_ve820(vm, BZIMG_LOAD_PARAMS_SIZE, MEM_4K, MEM_1M);
 
+	/*
+	 * bzImage is the x86 Linux loader path. It builds zeropage, bootargs,
+	 * ramdisk placement, and protected-mode entry state before vCPU launch.
+	 * ARM64 Linux does not use this path; it enters through rawimage_loader
+	 * with an FDT passed by arch_vm_prepare_bsp().
+	 */
 	if (load_params_gpa != INVALID_GPA) {
 		uint64_t kernel_load_gpa = (uint64_t)get_bzimage_kernel_load_addr(vm);
 

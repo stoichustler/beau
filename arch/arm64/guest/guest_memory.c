@@ -11,6 +11,19 @@
 #include <errno.h>
 #include <asm/platform.h>
 
+/*
+ * Raw-image loading and guest-copy helpers use the same platform RAM window
+ * that stage-2 maps in arch/arm64/guest/vm.c:
+ *
+ *   guest IPA/GPA = guest_ram_start + offset
+ *   host PA       = guest_ram_hpa   + offset
+ *
+ * The current ARM64 static platforms set guest_ram_hpa == guest_ram_start, so
+ * this offset calculation collapses to a 1:1 GPA-to-HPA mapping. Keeping the
+ * formula explicit makes the ownership boundary visible and gives future
+ * non-identity work one place to audit before relaxing the stage-2 identity
+ * check.
+ */
 static bool gpa_range_is_valid(struct acrn_vm *vm, uint64_t gpa, uint32_t size)
 {
 	uint64_t ram_start = arm64_platform_guest_ram_start(vm->vm_id);

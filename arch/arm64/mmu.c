@@ -159,8 +159,18 @@ static void init_hv_mapping(void)
 	 * - FDT reserved regions are removed,
 	 * - the hypervisor image is made executable while the rest remains NX.
 	 *
-	 * Identity mapping keeps early boot, exception handling, and low-level
-	 * MMIO code simple while the ARM64 port is still QEMU-focused.
+	 * pgtable_add_map() takes (physical base, virtual base, size). Passing
+	 * the same address for both bases is the whole 1:1 stage-1 construction:
+	 * every EL2 virtual address used by early boot, exception code, memcpy,
+	 * and MMIO helpers resolves to the same host physical address. Attributes
+	 * still differ by range, so RAM receives normal-cacheable descriptors and
+	 * device windows receive device descriptors even though both are identity
+	 * mapped.
+	 *
+	 * Reserved FDT ranges are deleted after the broad RAM identity map so EL2
+	 * does not accidentally access firmware-owned memory. The hypervisor image
+	 * remains identity mapped, but its leaf descriptors are modified to allow
+	 * instruction fetch while the rest of the identity RAM map stays NX.
 	 */
 	mmio_regions = arm64_get_platform_mmio_regions(&mmio_region_count);
 	for (idx = 0U; idx < mmio_region_count; idx++) {

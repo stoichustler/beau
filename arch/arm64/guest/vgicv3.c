@@ -1913,6 +1913,14 @@ bool arm64_vgicv3_has_pending_irq(struct acrn_vcpu *vcpu)
 		return false;
 	}
 
+	/*
+	 * This query is used by the ARM64 guest-return path, not by the generic
+	 * scheduler. It asks whether returning to the same EL1 context is part of
+	 * interrupt completion, for example when Linux has a pending timer LR but
+	 * still has DAIF.I set after WFI. The bounded rescue budget below prevents
+	 * that architectural forward-progress rule from becoming an unbounded
+	 * scheduler override on shared pCPUs.
+	 */
 	vgic = &vcpu->vm->arch_vm.vgic;
 	ctx = &vcpu->arch.vgic;
 	spinlock_irqsave_obtain(&vgic->lock, &flags);

@@ -18,6 +18,15 @@ extern const uint8_t rk356x_lk_image_size[];
 extern const uint8_t rk356x_zephyr_image_start[];
 extern const uint8_t rk356x_zephyr_image_size[];
 
+/*
+ * rk356x follows the same static ARM64 memory contract as QEMU during bring-up:
+ * each VM owns one configured host RAM window, and stage-2 maps that window
+ * with guest IPA/GPA equal to host PA. The identity relationship is encoded by
+ * setting arch.guest_ram_start and arch.guest_ram_hpa to the same platform
+ * constant below. arch/arm64/guest/vm.c validates this before building the
+ * stage-2 page tables, so hardware-platform changes must update both the VM
+ * RAM window and the image load/entry addresses together.
+ */
 static struct vm_hpa_regions zephyr_memory_regions[] = {
 	{
 		.start_hpa = RK356X_ZEPHYR_RAM_START,

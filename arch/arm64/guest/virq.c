@@ -12,6 +12,13 @@
 #include <asm/guest/virq.h>
 #include <asm/guest/vgicv3.h>
 
+/*
+ * ARM64 vIRQ is the bridge between common/device code and the architecture
+ * interrupt model. Guest GIC INTIDs are delegated to VGICv3 so descriptor,
+ * list-register, and wakeup state stay in one owner. The small bitmap fallback
+ * exists for non-GIC virtual events that only need to wake the vCPU request
+ * path; it is not a replacement for GIC interrupt lifecycle modeling.
+ */
 void vcpu_set_trap(struct acrn_vcpu *vcpu, struct arm64_vcpu_trap_info *trap)
 {
 	if (trap != NULL) {
@@ -41,6 +48,11 @@ int32_t vcpu_set_intr(struct acrn_vcpu *vcpu, uint32_t hwirq)
 	int32_t ret = -1;
 
 	if (hwirq < ARM64_VGIC_IRQ_NUM) {
+		/*
+		 * hwirq is already the guest-visible GIC INTID. VGICv3 owns the
+		 * target selection, pending descriptor, LR flush, and vCPU event
+		 * notification for these interrupts.
+		 */
 		ret = arm64_vgicv3_inject_irq(vcpu, hwirq, true);
 	} else if (hwirq < BITS_PER_LONG) {
 		bitmap_set(hwirq, &vcpu->arch.irqs_pending);
@@ -58,6 +70,11 @@ int32_t vcpu_clear_intr(struct acrn_vcpu *vcpu, uint32_t hwirq)
 	int32_t ret = -1;
 
 	if (hwirq < ARM64_VGIC_IRQ_NUM) {
+		/*
+		 * Clearing a guest GIC INTID must also reconcile any resident LR
+		 * state; a plain pending-bit clear would leave EL1 able to observe
+		 * an interrupt that software believes is gone.
+		 */
 		ret = arm64_vgicv3_clear_irq(vcpu, hwirq);
 	} else if (hwirq < BITS_PER_LONG) {
 		bitmap_clear(hwirq, &vcpu->arch.irqs_pending);

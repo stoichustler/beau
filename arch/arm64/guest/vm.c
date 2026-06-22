@@ -39,17 +39,17 @@ DEFINE_PAGE_TABLE(stage2_pages_bitmap);
 static uint8_t stage2_zero_page[PAGE_SIZE] __aligned(PAGE_SIZE);
 static bool stage2_page_pool_initialized;
 
-static void log_stage2_map(const struct acrn_vm *vm, const char *name, const char *attr,
+static void log_stage2_map(const struct acrn_vm *vm, const char *name,
 	uint64_t ipa, uint64_t pa, uint64_t size)
 {
-	pr_info("vm-%u stage-2 map %-10s %-8s ipa[0x%08lx-0x%08lx]:pa[0x%08lx-0x%08lx]",
-		vm->vm_id, name, attr, ipa, ipa + size, pa, pa + size);
+	pr_info("vm-%u stage-2 map %-7s ipa[0x%08lx-0x%08lx]:pa[0x%08lx-0x%08lx]",
+		vm->vm_id, name, ipa, ipa + size, pa, pa + size);
 }
 
 static void log_stage2_vio(const struct acrn_vm *vm, const char *name,
 	uint64_t ipa, uint64_t size)
 {
-	pr_info("vm-%u stage-2 vio %-10s ipa[0x%08lx-0x%08lx]",
+	pr_info("vm-%u stage-2 vio %-7s ipa[0x%08lx-0x%08lx]",
 		vm->vm_id, name, ipa, ipa + size);
 }
 
@@ -169,14 +169,12 @@ static void init_stage2_identity_map(struct acrn_vm *vm)
 	 */
 	pgtable_add_map((uint64_t *)vm->root_stg2ptp, mem_hpa, mem_start,
 		mem_size, PAGE_S2_ATTR_NORMAL | PAGE_BLOCK_DESC, &vm->stg2_pgtable);
-	log_stage2_map(vm, "ram", "normal", mem_start, mem_hpa, mem_size);
-	pr_info("vm-%u stage-2 ram uses identity ipa[0x%08lx-0x%08lx]:pa[0x%08lx-0x%08lx]",
-		vm->vm_id, mem_start, mem_start + mem_size, mem_hpa, mem_hpa + mem_size);
+	log_stage2_map(vm, "ram", mem_start, mem_hpa, mem_size);
 
 	pgtable_add_map((uint64_t *)vm->root_stg2ptp, hva2hpa(stage2_zero_page), 0UL,
 		PAGE_SIZE, PAGE_S2_MEMATTR_NORMAL | PAGE_S2_S2AP_READ |
 		PAGE_S2_SH_INNER | PAGE_S2_AF, &vm->stg2_pgtable);
-	log_stage2_map(vm, "zero", "read", 0UL, hva2hpa(stage2_zero_page), PAGE_SIZE);
+	log_stage2_map(vm, "zero", 0UL, hva2hpa(stage2_zero_page), PAGE_SIZE);
 
 	/*
 	 * Device IPA ranges are logged here but registered below as vio MMIO. The

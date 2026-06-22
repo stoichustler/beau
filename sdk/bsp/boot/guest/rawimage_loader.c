@@ -111,7 +111,7 @@ static int32_t load_rawimage(struct acrn_vm *vm)
 #endif
 
 	if (!range_fits(kernel_load_gpa, sw_kernel->kernel_size, ram_start, ram_size)) {
-		pr_err("vm-%u image %s does not fit ram gpa[0x%lx-0x%lx]",
+		pr_err("vm-%u:%-9s does not fit ram gpa[0x%lx-0x%lx]",
 			vm->vm_id, vm_config->os_config.kernel_mod_tag, kernel_load_gpa,
 			kernel_load_gpa + sw_kernel->kernel_size);
 		return -EFAULT;
@@ -120,14 +120,14 @@ static int32_t load_rawimage(struct acrn_vm *vm)
 	if (ramdisk_size > 0U) {
 		ramdisk_load_gpa = vm_config->os_config.kernel_ramdisk_addr;
 		if (ramdisk_load_gpa == 0UL) {
-			pr_err("vm-%u ramdisk %s has no load address",
+			pr_err("vm-%u:%-9s has no load address",
 				vm->vm_id, vm_config->os_config.ramdisk_mod_tag);
 			return -EFAULT;
 		}
 		if (!range_fits(ramdisk_load_gpa, ramdisk_size, ram_start, ram_size) ||
 			range_overlaps(ramdisk_load_gpa, ramdisk_size, kernel_load_gpa,
 				sw_kernel->kernel_size)) {
-			pr_err("vm-%u ramdisk %s does not fit ram gpa[0x%lx-0x%lx]",
+			pr_err("vm-%u:%-9s does not fit ram gpa[0x%lx-0x%lx]",
 				vm->vm_id, vm_config->os_config.ramdisk_mod_tag, ramdisk_load_gpa,
 				ramdisk_load_gpa + ramdisk_size);
 			return -EFAULT;
@@ -164,11 +164,11 @@ static int32_t load_rawimage(struct acrn_vm *vm)
 	/* Copy the guest kernel image to its run-time location */
 	ret = copy_to_gpa(vm, sw_kernel->kernel_src_addr, kernel_load_gpa, sw_kernel->kernel_size);
 	if (ret == 0) {
-		pr_info("vm-%u image %s copied to 1:1 ram gpa[0x%lx-0x%lx]",
+		pr_info("vm-%u:%-9s copied to 1:1 ram gpa[0x%lx-0x%lx]",
 			vm->vm_id, vm_config->os_config.kernel_mod_tag, kernel_load_gpa,
 			kernel_load_gpa + sw_kernel->kernel_size);
 	} else {
-		pr_err("vm-%u image %s does not fit 1:1 ram gpa[0x%lx-0x%lx]",
+		pr_err("vm-%u:%-9s does not fit 1:1 ram gpa[0x%lx-0x%lx]",
 			vm->vm_id, vm_config->os_config.kernel_mod_tag, kernel_load_gpa,
 			kernel_load_gpa + sw_kernel->kernel_size);
 		return -EFAULT;
@@ -177,11 +177,11 @@ static int32_t load_rawimage(struct acrn_vm *vm)
 	if (ramdisk_size > 0U) {
 		ret = copy_to_gpa(vm, ramdisk_info->src_addr, ramdisk_load_gpa, ramdisk_size);
 		if (ret == 0) {
-			pr_info("vm-%u ramdisk %s copied to 1:1 ram gpa[0x%lx-0x%lx]",
+			pr_info("vm-%u:%-9s copied to 1:1 ram gpa[0x%lx-0x%lx]",
 				vm->vm_id, vm_config->os_config.ramdisk_mod_tag, ramdisk_load_gpa,
 				ramdisk_load_gpa + ramdisk_size);
 		} else {
-			pr_err("vm-%u ramdisk %s does not fit 1:1 ram gpa[0x%lx-0x%lx]",
+			pr_err("vm-%u:%-9s does not fit 1:1 ram gpa[0x%lx-0x%lx]",
 				vm->vm_id, vm_config->os_config.ramdisk_mod_tag, ramdisk_load_gpa,
 				ramdisk_load_gpa + ramdisk_size);
 			return -EFAULT;

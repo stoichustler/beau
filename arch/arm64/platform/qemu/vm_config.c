@@ -142,15 +142,15 @@ struct acrn_vm_config vm_configs[CONFIG_MAX_VM_NUM] = {
 			.name = "Linux",
 			.kernel_type = KERNEL_RAWIMAGE,
 			.kernel_mod_tag = "Linux",
-			.ramdisk_mod_tag = "Initramfs.cpio.gz",
-			.bootargs = "console=ttyAMA0 rdinit=/init loglevel=7 earlycon=pl011,0x09000000",
+			.ramdisk_mod_tag = "Initramfs",
+			.bootargs = "console=ttyAMA0 rdinit=/init loglevel=7",
 			.kernel_load_addr = QEMU_LINUX_KERNEL_LOAD_ADDR,
 			.kernel_entry_addr = QEMU_LINUX_KERNEL_LOAD_ADDR,
 			.kernel_ramdisk_addr = QEMU_LINUX_INITRAMFS_LOAD_ADDR,
 			.kernel_ramdisk_size = BEAU_LINUX_INITRAMFS_SIZE,
 		},
 		.fdt_config = {
-			.fdt_mod_tag = "beau-linux-dtb",
+			.fdt_mod_tag = "dtb",
 		},
 		.arch = {
 			.guest_ram_start = QEMU_LINUX_RAM_START,
@@ -191,12 +191,12 @@ struct bare_boot_option bare_boot_options[] = {
 	{
 		.addr = QEMU_LINUX_INITRAMFS_STAGE_ADDR,
 		.size = BEAU_LINUX_INITRAMFS_SIZE,
-		.tag = "Initramfs.cpio.gz",
+		.tag = "Initramfs",
 	},
 	{
 		.addr = (uint64_t)qemu_beau_linux_dtb_start,
 		.size = (uint64_t)qemu_beau_linux_dtb_size,
-		.tag = "beau-linux-dtb",
+		.tag = "dtb",
 	},
 };
 

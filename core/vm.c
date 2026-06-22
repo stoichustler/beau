@@ -471,7 +471,7 @@ int32_t create_vm(uint16_t vm_id, uint64_t pcpu_bitmap, struct acrn_vm_config *v
 
 	if (vm_config->name[0] == '\0') {
 		/* if VM name is not configured, specify with VM ID */
-		snprintf(vm_config->name, 16, "BEAU vm_%d", vm_id);
+		snprintf(vm_config->name, 16, "BEAU vm-%d", vm_id);
 	}
 
 	(void)memcpy_s(&vm->name[0], MAX_VM_NAME_LEN, &vm_config->name[0], MAX_VM_NAME_LEN);
@@ -492,7 +492,8 @@ int32_t create_vm(uint16_t vm_id, uint64_t pcpu_bitmap, struct acrn_vm_config *v
 
 	/* TODO: Some logic inside arch_init_vm can also be moved to common but
 	 * we didn't come up with abstraction good enough to capture dependencies. Leave those
-	 * inside arch for now. */
+	 * inside arch for now.
+	 */
 	status = arch_init_vm(vm, vm_config);
 
 	if (status == 0) {

@@ -398,7 +398,7 @@ static void gits_init(void)
 		ctlr = gits_read32(GITS_CTLR);
 		if ((ctlr & GITS_CTLR_QUIESCENT) != 0U) {
 			gicv3_its_present = true;
-			pr_info("gicv3 its: base=0x%lx size=0x%lx typer=0x%lx",
+			pr_info("gicv3 its at 0x%016lx (0x%08lx) typer:0x%08lx",
 				base, size, gits_read64(GITS_TYPER));
 			return;
 		}

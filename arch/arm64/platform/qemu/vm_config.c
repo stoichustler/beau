@@ -143,7 +143,7 @@ struct acrn_vm_config vm_configs[CONFIG_MAX_VM_NUM] = {
 			.kernel_type = KERNEL_RAWIMAGE,
 			.kernel_mod_tag = "Linux",
 			.ramdisk_mod_tag = "Initramfs",
-			.bootargs = "console=ttyAMA0 rdinit=/init loglevel=7",
+			.bootargs = "console=ttyAMA0 rdinit=/init loglevel=7 earlycon=pl011,0x09000000",
 			.kernel_load_addr = QEMU_LINUX_KERNEL_LOAD_ADDR,
 			.kernel_entry_addr = QEMU_LINUX_KERNEL_LOAD_ADDR,
 			.kernel_ramdisk_addr = QEMU_LINUX_INITRAMFS_LOAD_ADDR,

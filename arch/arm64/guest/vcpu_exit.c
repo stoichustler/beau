@@ -34,7 +34,7 @@
  * Interrupt and timer return paths:
  *
  *   EL1 ICC_* sysreg trap -> handle_sysreg() -> arm64_vgicv3_*()
- *   EL1 CNT* sysreg trap -> handle_timer_sysreg() -> update_current_vtimer()
+ *   EL1 CNT* sysreg trap -> arm64_vtimer_handle_sysreg() -> update_current_vtimer()
  *   EL1 WFI/WFE trap     -> poll/update vtimer -> pending check -> maybe yield
  *   physical IRQ at EL2  -> dispatch IRQ/softirq -> maybe schedule
  *                         -> poll/update vtimer -> process vCPU requests
@@ -103,19 +103,6 @@ struct arm64_guest_stack_frame {
 	uint64_t fp;
 	uint64_t lr;
 };
-
-static uint32_t guest_timer_ctl_value(uint32_t ctl, uint64_t cval, uint64_t now)
-{
-	uint32_t value = ctl & (CNTV_CTL_ENABLE | CNTV_CTL_IMASK);
-
-	if (((value & CNTV_CTL_ENABLE) != 0U) &&
-		((value & CNTV_CTL_IMASK) == 0U) &&
-		((int64_t)(cval - now) <= 0L)) {
-		value |= CNTV_CTL_ISTATUS;
-	}
-
-	return value;
-}
 
 static uint64_t arm64_fault_ipa(const struct cpu_regs *regs)
 {
@@ -619,161 +606,6 @@ static int32_t handle_hvc64(struct acrn_vcpu *vcpu)
 	return ret;
 }
 
-static void guest_timer_write_live_ctl(struct arm64_vcpu_guest_ctx *gctx)
-{
-	uint32_t ctl = (gctx->timer_virq == ARM64_GIC_PPI_PHYSICAL_TIMER) ?
-		gctx->cntp_ctl_el0 : gctx->cntv_ctl_el0;
-	bool host_masked = gctx->cntv_el2_masked;
-
-	gctx->cntv_el2_masked = false;
-	write_cntv_ctl_el0(ctl & (CNTV_CTL_ENABLE | CNTV_CTL_IMASK));
-	if (host_masked) {
-		arm64_gicv3_set_irq_priority(ARM64_GIC_PPI_VIRTUAL_TIMER,
-			ARM64_GIC_PRIORITY_DEFAULT);
-	}
-}
-
-/*
- * The host owns CNTP for the per-pCPU scheduler tick, so guest accesses to
- * either the physical-timer or virtual-timer ABI are backed by the vCPU's CNTV
- * state. timer_virq remembers which PPI number the guest expects: RTOS guests
- * that use CNTP still receive the physical-timer PPI, while guests using CNTV
- * receive the virtual-timer PPI. This keeps the host deadline independent from
- * guest timer programming while preserving the guest-visible interrupt ABI.
- *
- *   guest CNT* read/write -> update timer shadow/live CNTV
- *        -> caller samples CNTV via update_current_vtimer()
- *        -> vGIC presents or removes the guest timer line
- */
-static int32_t handle_timer_sysreg(struct acrn_vcpu *vcpu, uint64_t sysreg, bool read, uint64_t *reg)
-{
-	struct arm64_vcpu_guest_ctx *gctx = &vcpu->arch.gctx;
-	struct arm64_vcpu_last_timer *last = &vcpu->arch.debug.last_timer;
-	uint64_t now = read_cntvct_el0();
-	uint64_t write_value = (reg != NULL) ? *reg : 0UL;
-	uint32_t write_ctl = (uint32_t)(write_value & (CNTV_CTL_ENABLE | CNTV_CTL_IMASK));
-	uint64_t val;
-	int32_t ret = 0;
-
-	switch (sysreg) {
-	case SYSREG_CNTPCT_EL0:
-		gctx->timer_virq = ARM64_GIC_PPI_PHYSICAL_TIMER;
-		if (read) {
-			if (reg != NULL) {
-				*reg = read_cntvct_el0();
-			}
-		} else {
-			ret = -EINVAL;
-		}
-		break;
-	case SYSREG_CNTVCT_EL0:
-		gctx->timer_virq = ARM64_GIC_PPI_VIRTUAL_TIMER;
-		if (read) {
-			if (reg != NULL) {
-				*reg = read_cntvct_el0();
-			}
-		} else {
-			ret = -EINVAL;
-		}
-		break;
-	case SYSREG_CNTP_CTL_EL0:
-		gctx->timer_virq = ARM64_GIC_PPI_PHYSICAL_TIMER;
-		if (read) {
-			if (reg != NULL) {
-				*reg = guest_timer_ctl_value(gctx->cntp_ctl_el0,
-					gctx->cntp_cval_el0, now);
-			}
-		} else {
-			gctx->cntp_ctl_el0 = write_ctl;
-			guest_timer_write_live_ctl(gctx);
-		}
-		break;
-	case SYSREG_CNTV_CTL_EL0:
-		gctx->timer_virq = ARM64_GIC_PPI_VIRTUAL_TIMER;
-		if (read) {
-			if (reg != NULL) {
-				*reg = guest_timer_ctl_value(gctx->cntv_ctl_el0,
-					gctx->cntv_cval_el0, now);
-			}
-		} else {
-			gctx->cntv_ctl_el0 = write_ctl;
-			guest_timer_write_live_ctl(gctx);
-		}
-		break;
-	case SYSREG_CNTP_CVAL_EL0:
-		gctx->timer_virq = ARM64_GIC_PPI_PHYSICAL_TIMER;
-		if (read) {
-			if (reg != NULL) {
-				*reg = gctx->cntp_cval_el0;
-			}
-		} else {
-			gctx->cntp_cval_el0 = write_value;
-			write_cntv_cval_el0(gctx->cntp_cval_el0);
-			guest_timer_write_live_ctl(gctx);
-		}
-		break;
-	case SYSREG_CNTV_CVAL_EL0:
-		gctx->timer_virq = ARM64_GIC_PPI_VIRTUAL_TIMER;
-		if (read) {
-			if (reg != NULL) {
-				*reg = gctx->cntv_cval_el0;
-			}
-		} else {
-			gctx->cntv_cval_el0 = write_value;
-			write_cntv_cval_el0(gctx->cntv_cval_el0);
-			guest_timer_write_live_ctl(gctx);
-		}
-		break;
-	case SYSREG_CNTP_TVAL_EL0:
-		gctx->timer_virq = ARM64_GIC_PPI_PHYSICAL_TIMER;
-		if (read) {
-			if (reg != NULL) {
-				*reg = (uint32_t)(gctx->cntp_cval_el0 - now);
-			}
-		} else {
-			val = now + (uint64_t)(int32_t)(uint32_t)write_value;
-			gctx->cntp_cval_el0 = val;
-			write_cntv_cval_el0(val);
-			guest_timer_write_live_ctl(gctx);
-		}
-		break;
-	case SYSREG_CNTV_TVAL_EL0:
-		gctx->timer_virq = ARM64_GIC_PPI_VIRTUAL_TIMER;
-		if (read) {
-			if (reg != NULL) {
-				*reg = (uint32_t)(gctx->cntv_cval_el0 - now);
-			}
-		} else {
-			val = now + (uint64_t)(int32_t)(uint32_t)write_value;
-			gctx->cntv_cval_el0 = val;
-			write_cntv_cval_el0(val);
-			guest_timer_write_live_ctl(gctx);
-		}
-		break;
-	default:
-		ret = -EINVAL;
-		break;
-	}
-
-	last->cval = (gctx->timer_virq == ARM64_GIC_PPI_PHYSICAL_TIMER) ?
-		gctx->cntp_cval_el0 : gctx->cntv_cval_el0;
-	last->ctl = (gctx->timer_virq == ARM64_GIC_PPI_PHYSICAL_TIMER) ?
-		guest_timer_ctl_value(gctx->cntp_ctl_el0, gctx->cntp_cval_el0, now) :
-		guest_timer_ctl_value(gctx->cntv_ctl_el0, gctx->cntv_cval_el0, now);
-	last->virq = gctx->timer_virq;
-	last->sysreg = (uint32_t)sysreg;
-	last->status = ret;
-	last->write = !read;
-	last->injected = false;
-	last->tsc = cpu_ticks();
-	if (!read) {
-		arm64_vcpu_trace_vtimer(vcpu, ARM64_VTIMER_TRACE_SYSREG,
-			last->virq, last->ctl, last->cval, true, false);
-	}
-
-	return ret;
-}
-
 static int32_t handle_sysreg(struct acrn_vcpu *vcpu)
 {
 	struct cpu_regs *regs = &vcpu->arch.regs;
@@ -838,11 +670,8 @@ static int32_t handle_sysreg(struct acrn_vcpu *vcpu)
 		if (ret == 0) {
 			advance_vcpu_elr(vcpu);
 		}
-	} else if ((sysreg == SYSREG_CNTPCT_EL0) || (sysreg == SYSREG_CNTVCT_EL0) ||
-		(sysreg == SYSREG_CNTP_CTL_EL0) || (sysreg == SYSREG_CNTP_CVAL_EL0) ||
-		(sysreg == SYSREG_CNTP_TVAL_EL0) || (sysreg == SYSREG_CNTV_CTL_EL0) ||
-		(sysreg == SYSREG_CNTV_CVAL_EL0) || (sysreg == SYSREG_CNTV_TVAL_EL0)) {
-		ret = handle_timer_sysreg(vcpu, sysreg, read, reg);
+	} else if (arm64_vtimer_sysreg(sysreg)) {
+		ret = arm64_vtimer_handle_sysreg(vcpu, sysreg, read, reg);
 		if (ret == 0) {
 			advance_vcpu_elr(vcpu);
 			if (!read) {

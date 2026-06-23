@@ -10,6 +10,10 @@ ARCH_LDSCRIPT_IN = arch/lds/link_ram.ld.in
 
 CFLAGS += -std=gnu99
 CFLAGS += -DCONFIG_ARM64
+CFLAGS += -DSMP
+ifeq ($(CONFIG_ARM64_GICV5),y)
+CFLAGS += -DCONFIG_ARM64_GICV5=1
+endif
 
 LDFLAGS += -Wl,--no-warn-rwx-segments
 LDFLAGS += -Wl,-z,norelro
@@ -48,7 +52,14 @@ HOST_C_SRCS += arch/arm64/psci.c
 HOST_C_SRCS += arch/arm64/mmu.c
 HOST_C_SRCS += arch/arm64/pgtable.c
 HOST_C_SRCS += arch/arm64/irq.c
-HOST_C_SRCS += arch/arm64/gicv3.c
+ifeq ($(CONFIG_ARM64_GICV5),y)
+HOST_C_SRCS += arch/arm64/gic/gicv5.c
+HOST_C_SRCS += arch/arm64/gic/gicv5_its.c
+HOST_C_SRCS += arch/arm64/gic/gicv5_iwb.c
+else
+HOST_C_SRCS += arch/arm64/gic/gicv3.c
+HOST_C_SRCS += arch/arm64/gic/gicv3_its.c
+endif
 HOST_C_SRCS += arch/arm64/timer.c
 HOST_C_SRCS += arch/arm64/notify.c
 HOST_C_SRCS += arch/arm64/trap.c
@@ -70,6 +81,7 @@ VP_C_SRCS += arch/arm64/guest/vm.c
 VP_C_SRCS += arch/arm64/guest/vcpu_exit.c
 VP_C_SRCS += arch/arm64/guest/virq.c
 VP_C_SRCS += arch/arm64/guest/vgicv3.c
+VP_C_SRCS += arch/arm64/guest/vtimer.c
 VP_C_SRCS += arch/arm64/guest/vpl011.c
 ifeq ($(PLATFORM),qemu)
 VM_CFG_C_SRCS += arch/arm64/platform/qemu/vm_config.c

@@ -46,6 +46,11 @@ struct arm64_gicv3_local_irq_state {
 	bool valid;
 };
 
+struct arm64_gicv3_msi_msg {
+	uint64_t addr;
+	uint32_t data;
+};
+
 struct intr_excp_ctx {
 	struct cpu_regs regs;
 };
@@ -66,6 +71,15 @@ void arm64_gicv3_disable_irq(uint32_t intid);
 void arm64_gicv3_clear_irq(uint32_t intid);
 void arm64_gicv3_set_irq_priority(uint32_t intid, uint8_t priority);
 bool arm64_gicv3_has_its(void);
+bool arm64_gicv3_map_spi_msi(uint32_t intid, uint64_t *addr, uint32_t *data);
+int32_t arm64_gicv3_its_alloc_msi(uint32_t dev_id, uint32_t count,
+	uint32_t *first_lpi, struct arm64_gicv3_msi_msg *msgs);
+void arm64_gicv3_its_release_msi(uint32_t dev_id, uint32_t first_lpi,
+	uint32_t count);
+int32_t arm64_gicv3_its_alloc_msix(uint32_t dev_id, uint32_t vector,
+	uint32_t *lpi, struct arm64_gicv3_msi_msg *msg);
+void arm64_gicv3_its_release_msix(uint32_t dev_id, uint32_t lpi);
+int32_t arm64_gicv3_its_map_msi(uint32_t lpi, struct arm64_gicv3_msi_msg *msg);
 void arm64_gicv3_get_local_irq_state(uint16_t pcpu_id, uint32_t intid,
 	struct arm64_gicv3_local_irq_state *state);
 void arm64_gicv3_send_sgi(uint16_t pcpu_id, uint32_t sgi_id);

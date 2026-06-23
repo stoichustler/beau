@@ -1019,7 +1019,7 @@ static int32_t shell_schedstat(__unused int32_t argc, __unused char **argv)
 	}
 
 	if (has_bvt_stats) {
-		shell_puts("\r\nbvt thread stats:\r\n");
+		shell_puts("\r\nBVT stats:\r\n\r\n");
 		shell_puts("name             pcpu  state     weight  avt       evt\r\n");
 		shell_puts("───────────────  ────  ────────  ──────  ────────  ────────\r\n");
 

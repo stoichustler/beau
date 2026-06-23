@@ -183,6 +183,11 @@ boot logs settle to show the `console:\>` prompt.
 - ARM64 data-abort MMIO dispatch into the common MMIO vio path.
 - Static vFDT generation for static ARM64 VMs, including CPU nodes, memory,
   PSCI, GICv3, timer, and PL011.
+- ARM64 physical GIC sources are organized under `arch/arm64/gic/` with the
+  imported FreeBSD file headers preserved. The default path builds
+  `gicv3.c` and `gicv3_its.c`; `CONFIG_ARM64_GICV5=y` selects `gicv5.c`,
+  `gicv5_its.c`, and `gicv5_iwb.c`. Active GICv3/GICv5 sources use BEAU
+  static platform data instead of FreeBSD FDT/ACPI/device/bus attachment code.
 - Raw-image loader support for ARM64 guest RAM start and FDT placement.
 - PSCI virtualization for guest `CPU_ON`, `CPU_OFF`, `AFFINITY_INFO`,
   `SYSTEM_OFF`, and `SYSTEM_RESET`.
@@ -485,6 +490,24 @@ The following have been verified on QEMU with `-smp 8`:
   `ITS: Using hypervisor restricted LPI range [8192]`, and allocated LPI
   pending tables for CPU0-CPU3. This predates the switch to the direct
   initramfs `uos` shell.
+- On 2026-06-23 the physical GIC import was build-validated after adding
+  `gicv5_iwb.c` to the `CONFIG_ARM64_GICV5=y` source list. Clean builds passed
+  for QEMU and rk356x with both the default GICv3 path and the GICv5-selected
+  path:
+
+```bash
+make ARCH=arm64 PLATFORM=qemu CROSS_COMPILE=aarch64-none-elf- clean
+make ARCH=arm64 PLATFORM=qemu CROSS_COMPILE=aarch64-none-elf- CONFIG_ARM64_GICV5=y -j$(nproc)
+make ARCH=arm64 PLATFORM=rk356x CROSS_COMPILE=aarch64-none-elf- clean
+make ARCH=arm64 PLATFORM=rk356x CROSS_COMPILE=aarch64-none-elf- CONFIG_ARM64_GICV5=y -j$(nproc)
+make ARCH=arm64 PLATFORM=qemu CROSS_COMPILE=aarch64-none-elf- clean
+make ARCH=arm64 PLATFORM=qemu CROSS_COMPILE=aarch64-none-elf- -j$(nproc)
+make ARCH=arm64 PLATFORM=rk356x CROSS_COMPILE=aarch64-none-elf- clean
+make ARCH=arm64 PLATFORM=rk356x CROSS_COMPILE=aarch64-none-elf- -j$(nproc)
+```
+
+  This is compile validation only. QEMU boot, `scripts/regress.py`, and rk356x
+  hardware validation still require explicit manual runs.
 
 ## Manual Regression
 
@@ -565,7 +588,8 @@ timer LR such as `0x508000000000001b`.
 
 This section is written for engineers taking over the ARM64 interrupt/timer
 path. It describes the intended design flow rather than only the current bug
-state. Keep it synchronized with `arch/arm64/gicv3.c`,
+state. Keep it synchronized with `arch/arm64/gic/`,
+`arch/arm64/gic/gicv3.c`, `arch/arm64/gic/gicv3_its.c`,
 `arch/arm64/timer.c`, `arch/arm64/guest/virq.c`,
 `arch/arm64/guest/vgicv3.c`, `include/arch/arm64/asm/guest/vgicv3.h`, and the
 guest-exit path.
@@ -573,9 +597,25 @@ guest-exit path.
 ### Architecture Map
 
 - Physical GICv3 host layer:
-  `arch/arm64/gicv3.c` initializes the real Distributor, Redistributors, ITS
-  quiesce state, and CPU interface. It owns physical INTIDs, priorities,
-  enable bits, SGI send, ACK/EOI, and local SGI/PPI state used by `irqstat`.
+  `arch/arm64/gic/` contains the imported FreeBSD GICv3/GICv5/ITS/IWB source
+  files with their original file headers preserved. `gicv3.c` and
+  `gicv3_its.c` are trimmed to BEAU static-platform code: they initialize the
+  real GICv3 Distributor, Redistributors, ITS state, MSI/MSI-X message mapping,
+  SGI/SMP handling, and CPU interface using BEAU platform addresses, while
+  keeping the `arm64_gicv3_*` ABI used by IRQ, timer, and vGIC code.
+- Physical GICv5 host layer:
+  `CONFIG_ARM64_GICV5=y` selects `arch/arm64/gic/gicv5.c`,
+  `gicv5_its.c`, and `gicv5_iwb.c`. These files retain the FreeBSD file
+  headers but remove FreeBSD FDT/ACPI/device/bus framework glue. `gicv5.c`
+  provides the BEAU-facing `arm64_gicv3_*` ABI used by IRQ, timer, and vGIC
+  code, with GICv5 CPU-interface setup, SMP SGI delivery through LPI pending
+  commands, and separate PPI/SPI/LPI command paths. `gicv5_its.c` provides the
+  current BEAU MSI/MSI-X allocation, release, and mapping boundary using the
+  GICv5 ITS translate frame. `gicv5_iwb.c` provides static IWB register glue:
+  firmware enable detection, wire-count discovery, all-wire disable during
+  init, wire enable/disable, and level/edge programming helpers. IWB is still
+  absent by default because the static platform API does not yet expose IWB
+  base/size values.
 - Host physical timer layer:
   `arch/arm64/timer.c` uses CNTP/physical timer PPI30 as the EL2 scheduler
   tick. Guest timer work must not steal CNTP, because CNTP is the host
@@ -618,8 +658,9 @@ guest-exit path.
 ### Physical GICv3 Flow
 
 1. `arm64_gicv3_init_early()` discovers Redistributor frames by matching
-   `GICR_TYPER` affinity to per-pCPU MPIDR. Do not assume Redistributor frame
-   order equals logical pCPU order.
+   `GICR_TYPER` affinity to per-pCPU MPIDR, initializes the Distributor, and
+   quiesces a discovered physical ITS. Do not assume Redistributor frame order
+   equals logical pCPU order.
 2. The Distributor is reset into non-secure Group-1, affinity-routing mode.
    SPIs are disabled, pending/active state is cleared, priorities are set to
    `0x80`, and routes default to BSP until a richer routing policy exists.

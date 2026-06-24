@@ -12,6 +12,11 @@ explicit task changes them, announce intended file or area edits before making
 them, and follow the English design-comment rules for ARM64 virtualization
 code.
 
+ARM64 comments must stay concise and easy to understand. For non-obvious
+vGICv3, vtimer, vCPU entry/exit, trap, or scheduler handoff flows, combine short
+text with `sdk/item.md`-style ASCII diagrams so the ownership transition can be
+followed quickly. In short: 注释风格: 简洁易懂，图(`sdk/item.md`)文结合.
+
 BEAU development uses a human-run build and validation flow. Codex must not run
 BEAU builds, QEMU boots, hardware flashing, or `scripts/regress.py` unless the
 user explicitly asks for that specific run in the current task. By default,
@@ -387,6 +392,67 @@ init_thread_data(&vcpu->thread_obj, &params);
   `enter` is the first handoff from the vCPU thread into EL1, `exit` is the
   guest trap or physical interrupt return to EL2, and `resume` is the point
   where EL2 has finished handling the exit and is about to `ERET` back to EL1.
+
+### Shell Field Notes
+
+Use these field meanings when comparing `vmstat`, `dumpstat`, and `schedstat`
+captures during boot, reboot, or VM2 latency work:
+
+- `schedstat` pCPU table:
+  - `role`: `shared` means more than one vCPU is bound to the pCPU; `exclusive`
+    means no vCPU sharing was detected there.
+  - `scheduler`: active scheduler implementation on that pCPU.
+  - `timer`: scheduler timer callback count.
+  - `switches`: context switches where `schedule()` selected a different
+    thread.
+  - `resched`: reschedule requests raised by tick, wake, yield, or remote
+    reschedule paths.
+  - `runqueue`: runnable threads currently bound to the pCPU.
+  - `current`: thread currently selected on that pCPU.
+- `schedstat` BVT table:
+  - `weight`: BVT CPU share. Higher weight advances virtual time more slowly.
+  - `avt`: actual virtual time used for long-term fairness.
+  - `evt`: effective virtual time used for runnable ordering; bounded warp can
+    make `evt` lower than `avt` for a temporary wakeup boost.
+- `schedstat` RTDS table:
+  - `period.us`: replenishment period.
+  - `budget.us`: CPU budget granted per period.
+  - `remain.us`: budget left in the current period.
+  - `deadline-in.us`: time until the current RTDS deadline.
+- `vmstat` VM fields:
+  - `configured`: vCPU count implied by the configured affinity mask.
+  - `created`: vCPUs actually instantiated at runtime.
+  - `state`: VM lifecycle state.
+  - `flags`: guest flags from VM config.
+  - `load`: load order value.
+  - `affinity-config`: configured pCPU mask.
+  - `runtime`: runtime pCPU mask currently held by the VM.
+  - `root-s2`: whether the VM has a stage-2 root page table.
+  - `ring`: queued VM console bytes versus ring capacity.
+  - `pending`: VM console output is waiting to be drained.
+- `vmstat` vCPU fields:
+  - `sched`: scheduler class backing the vCPU thread.
+  - `vcpu`: vCPU lifecycle state.
+  - `thread`: scheduler thread state.
+  - `cur`: whether this vCPU thread is currently selected on its pCPU.
+  - `req-mask`: pending vCPU request bits.
+  - `diag`: quick hints such as `cpu-wait`, `rtds-depleted`,
+    `rtds-overrun`, and `vtimer-rescue`.
+  - `timer`: guest virtual timer state saved in the vCPU context.
+  - `cpuif`: saved vGIC CPU-interface state and LR usage.
+- `dumpstat` vCPU header:
+  - `pcpu`: pCPU bound to the vCPU thread.
+  - `sched`: scheduler-visible vCPU state.
+  - `current`: whether the vCPU is the selected thread on that pCPU.
+  - `live`: whether `dumpstat` captured live EL2 state through an IPI.
+- `dumpstat` guest trace:
+  - `src`: exit source, where `1` is synchronous trap and `2` is physical IRQ.
+  - `ec`: ESR exception class for synchronous exits; `N/A` means no sync EC is
+    available for that boundary.
+  - `status`: handler return status.
+  - `delta.us`: time since the previous printed guest-boundary row.
+  - `tsc`: raw host tick timestamp.
+  - `elr/esr/far/hpfar`: saved guest exception frame values.
 - `constat [vm id]` prints focused VM console state for live diagnostics:
   selected/input VM IDs, host input backlog, async TX ring usage and drops,
   vUART RX/TX state, vPL011 pending/assert/deassert counters, and the guest UART
@@ -1210,6 +1276,9 @@ Feasible next repair:
 New ARM64 virtualization code should use English comments for design intent,
 not line-by-line narration. The goal is to make the virtualization model
 auditable when memory, interrupt, and CPU state crosses an EL2/EL1 boundary.
+Comment style: keep the wording concise and easy to understand, and combine
+short text with `sdk/item.md`-style diagrams for complex state machines or
+ownership handoffs.
 
 - Add a module-level comment when a file owns an architectural subsystem or a
   cross-layer boundary, such as host stage-1 mappings, guest stage-2 mappings,
@@ -1222,6 +1291,10 @@ auditable when memory, interrupt, and CPU state crosses an EL2/EL1 boundary.
   translating a stage-2 abort into an MMIO request, loading or unloading EL2
   guest context, switching between host IRQ and guest IRQ paths, and validating
   VM memory isolation.
+- For vGICv3/vtimer paths, comments should identify the owner at each step:
+  guest-visible CNTV/CNTP state, EL2 shadow state, host PPI27 masking, vGIC
+  descriptor pending/active bits, pending bitmap scan state, and hardware LRs.
+  Use a compact diagram when a fix crosses more than two of these owners.
 - For abort/trap handling code, comments must distinguish instruction aborts
   from data aborts and from broader memory abort terminology. State the trigger
   scenario being handled, such as instruction fetch from unmapped or

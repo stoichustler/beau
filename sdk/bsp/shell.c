@@ -1190,6 +1190,10 @@ static int32_t shell_schedstat(__unused int32_t argc, __unused char **argv)
 		"\r\nschedstat pcpus:%hu\r\n", pcpu_num);
 	shell_puts(temp_str);
 
+	/*
+	 * Per-pCPU counters answer whether the scheduler is ticking, whether
+	 * context switches are happening, and which thread currently owns a CPU.
+	 */
 	shell_puts("\r\nPer-pCPU hybrid scheduler counters:\r\n\r\n");
 	shell_puts("pcpu  role       scheduler    timer   switches  resched  runqueue  current\r\n");
 	shell_puts("────  ─────────  ───────────  ──────  ────────  ───────  ────────  ─────────────────\r\n");
@@ -1229,6 +1233,10 @@ static int32_t shell_schedstat(__unused int32_t argc, __unused char **argv)
 	}
 
 	if (has_bvt_stats) {
+		/*
+		 * BVT stats expose virtual-time ordering. Lower avt/evt is more
+		 * eligible; weight controls how quickly virtual time advances.
+		 */
 		shell_puts("\r\nBVT stats:\r\n\r\n");
 		shell_puts("name             pcpu  state     weight  avt       evt\r\n");
 		shell_puts("───────────────  ────  ────────  ──────  ────────  ────────\r\n");
@@ -1254,6 +1262,10 @@ static int32_t shell_schedstat(__unused int32_t argc, __unused char **argv)
 	if (has_rtds_stats) {
 		uint64_t now = cpu_ticks();
 
+		/*
+		 * RTDS stats show fixed-period budget accounting and the time
+		 * left before the next scheduling deadline.
+		 */
 		shell_puts("\r\nRTDS stats:\r\n\r\n");
 		shell_puts("name             pcpu  state     period.us  budget.us  remain.us  deadline-in.us\r\n");
 		shell_puts("───────────────  ────  ────────  ─────────  ─────────  ─────────  ──────────────\r\n");

@@ -445,6 +445,10 @@ static void shell_dumpstat_guest_trace(const struct arm64_vcpu_guest_trace *trac
 
 	start = (trace->head + ARM64_VCPU_GUEST_TRACE_NUM - count) %
 		ARM64_VCPU_GUEST_TRACE_NUM;
+	/*
+	 * src identifies sync versus IRQ exits, ec is the ESR exception class
+	 * when available, and delta.us is time since the previous boundary row.
+	 */
 	for (idx = 0U; idx < count; idx++) {
 		uint32_t ring_idx = (start + idx) % ARM64_VCPU_GUEST_TRACE_NUM;
 		const struct arm64_vcpu_guest_trace_entry *entry = &trace->entry[ring_idx];
@@ -901,6 +905,10 @@ static int32_t shell_dumpstat_vcpu(struct acrn_vcpu *vcpu)
 	debug = snapshot.captured ? &snapshot.debug : &vcpu->arch.debug;
 
 	shell_item_begin("vm%hu/vcpu%hu", vcpu->vm->vm_id, vcpu->vcpu_id);
+	/*
+	 * Header fields identify CPU binding, scheduler state, whether this vCPU
+	 * is the current thread, and whether live EL2 state was sampled by IPI.
+	 */
 	shell_item_line("pcpu:%hu sched:%s current:%s live:%s", vcpu->thread_obj.pcpu_id,
 		vcpu_sched_state_to_str(vcpu),
 		shell_yes_no(current == &vcpu->thread_obj),
@@ -1191,6 +1199,11 @@ static void shell_vmstat_vm_config(uint16_t vm_id, const struct acrn_vm_config *
 		vu = vm_console_vuart((struct acrn_vm *)vm);
 	}
 
+	/*
+	 * VM-level fields describe configured resources versus runtime state:
+	 * vCPU count, affinity, scheduler policy, guest memory, interrupt
+	 * topology, console backlog, and boot image placement.
+	 */
 	shell_item_line("vcpus:configured:%u created:%hu state:%s flags:0x%016lx load:%u",
 		shell_cpu_bitmap_weight(vm_config->cpu_affinity), vm->hw.created_vcpus,
 		shell_vm_state_to_str(vm->state), vm_config->guest_flags,
@@ -1324,6 +1337,10 @@ static void shell_vmstat_vcpus(const struct acrn_vm *vm)
 	}
 
 	shell_item_section("vcpu state");
+	/*
+	 * The compact vCPU table is the first pass for "is this vCPU runnable,
+	 * currently selected, or waiting with pending work?" questions.
+	 */
 	shell_item_line("vcpu       pcpu  sched  vcpu     thread    cur  req-mask            diag");
 	shell_item_line("─────────  ────  ─────  ───────  ────────  ───  ──────────────────  ────────────");
 	for (vcpu_id = 0U; vcpu_id < vm->hw.created_vcpus; vcpu_id++) {
@@ -1350,12 +1367,14 @@ static void shell_vmstat_vcpus(const struct acrn_vm *vm)
 			shell_yes_no(current == &vcpu->thread_obj),
 			vcpu->pending_req, diag);
 		if (has_bvt) {
+			/* BVT fields expose weight and virtual-time scheduling order. */
 			shell_item_line("      bvt:weight:%u avt:%ld evt:%ld", bvt.weight,
 				bvt.avt, bvt.evt);
 		}
 		if (has_rtds) {
 			uint64_t now = cpu_ticks();
 
+			/* RTDS fields expose period budget and time to deadline. */
 			shell_item_line("      rtds:period-us:%lu budget-us:%lu remain-us:%lu deadline-in-us:%lu",
 				ticks_to_us(rtds.period_ticks), ticks_to_us(rtds.budget_ticks),
 				ticks_to_us(rtds.remaining_ticks),

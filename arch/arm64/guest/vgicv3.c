@@ -348,6 +348,10 @@ static void vgic_set_pending(struct arm64_vgicv3 *vgic, uint16_t vcpu_id,
 	uint32_t word;
 	uint32_t mask;
 
+	/*
+	 * The descriptor is the authoritative software state. The bitmap is only
+	 * the fast scan index used by flush and WFI wake checks.
+	 */
 	desc->pending = pending;
 	if (vgic_irq_is_lpi(virq)) {
 		virq -= ARM64_VGIC_LPI_BASE;
@@ -492,6 +496,10 @@ static uint64_t make_lr(const struct arm64_vgic_irq *desc)
 static bool vgicv3_keep_vtimer_pending_lr(const struct acrn_vcpu *vcpu,
 	const struct arm64_vgic_irq *desc)
 {
+	/*
+	 * LR rescue keeps the timer as Pending-only. That models a WFI wake that
+	 * has not yet reached guest IAR/EOIR, avoiding a false Active+Pending state.
+	 */
 	return vcpu->arch.vtimer_lr_rescue && vgic_is_vtimer_irq(vcpu, desc->virq) &&
 		desc->level && desc->pending && !desc->active &&
 		vcpu->arch.gctx.cntv_el2_masked &&
@@ -622,6 +630,11 @@ static bool vgicv3_vtimer_pending_lr_stalled(struct acrn_vcpu *vcpu,
 		*age_ticks = age;
 	}
 
+	/*
+	 * A stalled timer has all owners pointing at the same due line:
+	 * EL2 host mask is set, CNTV is still asserted, and the LR is pending-only
+	 * for longer than a healthy WFI-to-IAR window.
+	 */
 	stalled = gctx->cntv_el2_masked && desc->level && desc->pending &&
 		!desc->active && line_asserted &&
 		((state & ICH_LR_STATE_PENDING) != 0U) &&
@@ -688,6 +701,11 @@ static void vgic_update_irq_lr(struct acrn_vcpu *vcpu, const struct arm64_vgic_i
 		bool lr_pending = desc->enabled && desc->pending;
 		bool lr_active = desc->active;
 
+		/*
+		 * Guest MMIO may change enable, pending, active, priority, or route
+		 * while an LR is already loaded. Refresh or remove the existing LR so
+		 * the CPU interface mirrors the descriptor before the next guest entry.
+		 */
 		if (lr_pending || lr_active) {
 			vcpu->arch.vgic.lr[lr_idx] = make_lr_state(desc, lr_pending, lr_active);
 		} else {
@@ -1384,6 +1402,12 @@ bool arm64_vgicv3_requeue_lost_masked_timer(struct acrn_vcpu *vcpu)
 		return false;
 	}
 
+	/*
+	 * Repair path:
+	 *
+	 *   host-masked expired CNTV + no descriptor/LR owner
+	 *        -> recreate software pending timer line -> flush into LR
+	 */
 	vgic = &vcpu->vm->arch_vm.vgic;
 	virq = vcpu->arch.gctx.timer_virq;
 	if (virq == 0U) {
@@ -1433,6 +1457,10 @@ static void vgicv3_sync_timer_line_locked(struct acrn_vcpu *vcpu, bool is_curren
 	}
 
 	/*
+	 * Timer line sync bridges vtimer and vGIC ownership:
+	 *
+	 *   CNTV sample -> descriptor pending bit -> timer LR -> host PPI27 mask
+	 *
 	 * The timer interrupt is a level line whose source is CNTV while loaded
 	 * and the saved CNTV deadline while offline. Lowering the line must remove
 	 * stale pending-only LR state as well as the software pending bit, otherwise
@@ -1623,6 +1651,11 @@ static void vgicv3_sync_vcpu(struct acrn_vcpu *vcpu, bool is_current)
 			bool lr_active = ((state & ICH_LR_STATE_ACTIVE) != 0U);
 			bool removed = false;
 
+			/*
+			 * Remaining valid LRs are still owned by the virtual CPU interface.
+			 * Sync copies their state back to descriptors without dropping a
+			 * pending edge credit or a still-asserted level line.
+			 */
 			if (!desc->level && lr_active && !lr_pending) {
 				/*
 				 * Software edge IRQs remain active until an EOI maintenance

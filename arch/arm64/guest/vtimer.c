@@ -200,6 +200,15 @@ void arm64_vtimer_load_current(struct acrn_vcpu *vcpu)
 	}
 
 	gctx = &vcpu->arch.gctx;
+	/*
+	 * Load path:
+	 *
+	 *   saved CNTV/CNTP shadow -> live CNTV registers
+	 *   saved EL2 host mask    -> host PPI27 priority
+	 *
+	 * The guest sees CNTV/CNTP state, while EL2 keeps the temporary host-PPI
+	 * mask private to the vGIC/vtimer handoff.
+	 */
 	write_cntv_ctl_el0(0U);
 	if (gctx->cntv_el2_masked) {
 		arm64_gicv3_unmask_irq(ARM64_GIC_PPI_VIRTUAL_TIMER);
@@ -233,6 +242,11 @@ void arm64_vtimer_save_current(struct acrn_vcpu *vcpu)
 	}
 
 	/*
+	 * Save path:
+	 *
+	 *   live CNTV registers -> saved CNTV/CNTP shadow
+	 *   host PPI27 mask     -> EL2-only ownership state
+	 *
 	 * Linux may access the EL1 virtual timer directly when the trap is not
 	 * taken by the CPU model. Keep the guest shadow synchronized on vCPU
 	 * switch-out. EL2 may temporarily gate host PPI27 while a timer interrupt
@@ -344,6 +358,11 @@ int32_t arm64_vtimer_handle_sysreg(struct acrn_vcpu *vcpu, uint64_t sysreg,
 		return -EINVAL;
 	}
 
+	/*
+	 * Sysreg emulation is the guest-controlled side of timer ownership. Reads
+	 * return the guest timer view; writes update the shadow, refresh the live
+	 * CNTV register for the running vCPU, and clear stale host handoff.
+	 */
 	gctx = &vcpu->arch.gctx;
 	last = &vcpu->arch.debug.last_timer;
 	switch (sysreg) {
@@ -498,6 +517,11 @@ static void vtimer_arm_backup(struct acrn_vcpu *vcpu)
 		return;
 	}
 
+	/*
+	 * Backup timer covers the offline case: the vCPU is not running on this
+	 * pCPU, so EL2 arms a host timer for the saved guest deadline and later
+	 * rebuilds a normal vGIC timer injection if the deadline expires.
+	 */
 	vcpu->arch.vtimer_stuck_rescue_armed = false;
 	gctx = &vcpu->arch.gctx;
 	deadline = vtimer_host_deadline(gctx);
@@ -526,6 +550,11 @@ static void vtimer_arm_stuck_rescue(struct acrn_vcpu *vcpu)
 		return;
 	}
 
+	/*
+	 * Stuck rescue is a short watchdog for the loaded-vCPU path: CNTV is
+	 * already expired and host-masked, but guest acknowledgement has not made
+	 * progress. The handler rechecks the live line before forcing a WFI trap.
+	 */
 	deadline = cpu_ticks() + us_to_ticks(VTIMER_STUCK_RESCUE_US);
 	if (timer_is_started(&vcpu->arch.vtimer_backup)) {
 		del_timer(&vcpu->arch.vtimer_backup);
@@ -541,6 +570,10 @@ static void vtimer_arm_stuck_rescue(struct acrn_vcpu *vcpu)
 
 static void vtimer_arm_wfi_rescue(struct acrn_vcpu *vcpu)
 {
+	/*
+	 * TWI is used only to catch the next guest WFI and give EL2 one bounded
+	 * chance to rebuild a pending timer LR before Linux idles again.
+	 */
 	vcpu->arch.debug.vtimer_diag.wfi_rescue_arm++;
 	vcpu->arch.vtimer_wfi_rescue = true;
 	vcpu->arch.gctx.hcr_el2 |= HCR_TWI;
@@ -553,6 +586,10 @@ static void vtimer_arm_wfi_rescue(struct acrn_vcpu *vcpu)
 
 static void vtimer_keep_rescue(struct acrn_vcpu *vcpu)
 {
+	/*
+	 * Once a pending-only timer LR exists, the rescue owner is the LR rather
+	 * than TWI. Keep a small no-reschedule budget so EL1 can reach daifclr.
+	 */
 	vcpu->arch.vtimer_wfi_rescue = false;
 	if (!vcpu->arch.vtimer_lr_rescue) {
 		vcpu->arch.vtimer_lr_rescue_budget = VTIMER_LR_RESCUE_RESCHED_BUDGET;
@@ -566,6 +603,7 @@ static void vtimer_keep_rescue(struct acrn_vcpu *vcpu)
 
 static void vtimer_clear_rescue(struct acrn_vcpu *vcpu)
 {
+	/* Timer delivery is either complete or no longer due; release all rescue state. */
 	vcpu->arch.vtimer_wfi_rescue = false;
 	vcpu->arch.vtimer_lr_rescue = false;
 	vcpu->arch.vtimer_lr_rescue_budget = 0U;
@@ -580,6 +618,10 @@ static int32_t vtimer_inject_current(struct acrn_vcpu *vcpu, uint32_t virq,
 {
 	int32_t ret;
 
+	/*
+	 * Injection is the only place where an expired CNTV sample becomes a
+	 * guest-visible PPI. Keep the debug shadow next to the vGIC request.
+	 */
 	vtimer_disarm_backup(vcpu);
 	ret = arm64_vgicv3_inject_irq(vcpu, virq, true);
 	vcpu->arch.debug.last_timer.cval = guest_cval;
@@ -609,6 +651,10 @@ static void vtimer_backup_handler(void *data)
 	}
 	vcpu->arch.vtimer_stuck_rescue_armed = false;
 	if (get_running_vcpu(get_pcpu_id()) == vcpu) {
+		/*
+		 * Loaded-vCPU backup is a watchdog only. The live CNTV line remains
+		 * authoritative, so recheck the stuck condition before trapping WFI.
+		 */
 		if (!arm64_vgicv3_timer_live_stuck(vcpu)) {
 			return;
 		}
@@ -628,6 +674,10 @@ static void vtimer_backup_handler(void *data)
 		return;
 	}
 
+	/*
+	 * Offline backup has no live LR to inspect. If the saved guest deadline is
+	 * still expired, inject through the same vGIC path as a host PPI27 hit.
+	 */
 	arm64_vcpu_trace_vtimer(vcpu, ARM64_VTIMER_TRACE_BACKUP, virq,
 		ctl, vtimer_guest_cval(gctx), false, false);
 	(void)vtimer_inject_current(vcpu, virq, ctl, vtimer_guest_cval(gctx));
@@ -680,6 +730,11 @@ void arm64_vgicv3_update_current_vtimer(struct acrn_vcpu *vcpu)
 		vcpu->arch.gctx.timer_virq = virq;
 	}
 
+	/*
+	 * Update path at a bounded EL2 sync point:
+	 *
+	 *   live CNTV sample -> vGIC timer line -> optional rescue watchdog
+	 */
 	level = arm64_vtimer_sample_current(vcpu);
 	arm64_vgicv3_sync_current_timer_line(vcpu, level);
 	if (level || vcpu->arch.gctx.cntv_el2_masked) {
@@ -711,6 +766,11 @@ void arm64_vgicv3_virtual_timer_irq_handler(__unused uint32_t irq, __unused void
 			vcpu->arch.vtimer_host_handoff = false;
 			vcpu->arch.debug.vtimer_diag.stale_pending_lr_reinject++;
 		}
+		/*
+		 * Host PPI27 means the loaded guest timer fired. EL2 snapshots
+		 * live CNTV, priority-masks the host PPI, and asks vGIC to
+		 * present guest PPI27.
+		 */
 		if (virq == ARM64_GIC_PPI_PHYSICAL_TIMER) {
 			vcpu->arch.gctx.cntp_cval_el0 = read_cntv_cval_el0();
 			vcpu->arch.gctx.cntp_ctl_el0 = vtimer_live_ctl(vcpu);
@@ -747,6 +807,11 @@ void arm64_vgicv3_poll_current_vtimer(struct acrn_vcpu *vcpu)
 		(void)arm64_vgicv3_requeue_lost_masked_timer(vcpu);
 		return;
 	}
+	/*
+	 * Polling is not a background timer loop. It is used at bounded exit/return
+	 * points to rebuild guest-visible delivery if CNTV expired without a host
+	 * PPI path being taken.
+	 */
 	ctl = vtimer_live_ctl(vcpu);
 	cval = read_cntv_cval_el0();
 

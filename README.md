@@ -27,16 +27,7 @@ for mixed RTOS and Linux guests.
 
 ## Source Base And License
 
-BEAU is based on the Project ACRN hypervisor source tree and keeps ACRN-derived
-code under the BSD 3-Clause License.
-
-The ARM64 QEMU porting work is non-Intel work and is marked as
-`Copyright (C) 2026 Hustler Lo.` under the same BSD 3-Clause License. Third
-party components retain their original notices; see `NOTICE.md` and `LICENSES/`.
-
-License-risk summary: no GPL-only source was found. The notable item is libfdt,
-which is dual-licensed `GPL-2.0-or-later OR BSD-2-Clause`; use the BSD-2-Clause
-option when distributing BEAU to avoid GPL copyleft obligations.
+Check [LICENSE](LICENSE)
 
 ---
 

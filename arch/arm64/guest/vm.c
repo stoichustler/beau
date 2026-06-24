@@ -124,8 +124,6 @@ static void validate_stage2_ram_identity(const struct acrn_vm *vm, uint64_t mem_
 	if ((mem_size == 0UL) || ((mem_start + mem_size) <= mem_start)) {
 		panic("vm-%u has invalid stage-2 ram window", vm->vm_id);
 	}
-
-	pr_info("vm-%u stage-2 ram identity checked", vm->vm_id);
 }
 
 static void init_stage2_identity_map(struct acrn_vm *vm)

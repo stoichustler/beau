@@ -295,7 +295,7 @@ void launch_vms(uint16_t pcpu_id)
 
 		if (((vm_config->guest_flags & GUEST_FLAG_REE) != 0U) &&
 		    ((vm_config->guest_flags & GUEST_FLAG_TEE) != 0U)) {
-			ASSERT(false, "%s: wrong vm (vm id: %u) configuration, can't set both ree and tee flags",
+			ASSERT(false, "%s: wrong vm (vm id: %u) configuration",
 				__func__, vm_id);
 		}
 
@@ -325,7 +325,7 @@ void launch_vms(uint16_t pcpu_id)
 						if ((init_vm_boot_info(vm) == 0) &&
 							(prepare_os_image(vm) == 0)) {
 							start_vm(vm);
-							pr_acrnlog("start vmid: %x os: %s", vm_id, vm_config->name);
+							pr_acrnlog("kick vmid: %x os: %s", vm_id, vm_config->name);
 						} else {
 							pr_err("stopping vm%d: no bootable kernel", vm_id);
 							(void)destroy_vm(vm);

@@ -1252,9 +1252,76 @@ virtualization port.
   stress path previously reproduced the VM2 RCU/vtimer failure and should remain
   part of the acceptance gate for future fixes.
 
+## Next Phase Target: ACRN-DM Android Bring-Up
+
+The next major target is to move from the current static VM2 Linux validation
+path toward an ACRN-style post-launched Android User VM. `sdk/udev` contains the
+ACRN Device Model source, but the DM path expects a Linux Service VM with
+`/dev/acrn_hsm` or `/dev/acrn_vhm` and ioctl-backed VM creation, memory mapping,
+vCPU setup, interrupt injection, and ioreq completion. The current ARM64 QEMU
+scenario still uses Zephyr as the Service VM, sets `CONFIG_HAS_HSM=0` and
+`MAX_POST_VM_NUM=0`, and the ARM64 hypercall dispatcher returns `-ENOTTY` for
+the VM-management, ioreq, and IRQ operations that `acrn-dm` needs.
+
+Do not treat Android boot as a simple replacement of VM2 Linux images. The
+ACRN-compatible route is to first close the Linux Service VM, HSM, and
+`acrn-dm` control loop, then launch Android as a post-launched User VM through
+the device model.
+
+Target architecture:
+
+1. Provide a QEMU scenario variant with a Linux Service VM that can run
+   `sdk/udev/acrn-dm`.
+2. Enable one Android post-launched VM slot for the ARM64 QEMU platform by
+   introducing the required `CONFIG_HAS_HSM` and `MAX_POST_VM_NUM` support.
+3. Implement the minimal ARM64 HSM path needed by `sdk/udev/core/vmmapi.c`:
+   `HC_CREATE_VM`, `HC_DESTROY_VM`, `HC_START_VM`, `HC_PAUSE_VM`,
+   `HC_CREATE_VCPU`, `HC_SET_VCPU_REGS`, `HC_VM_SET_MEMORY_REGIONS`,
+   `HC_SET_IOREQ_BUFFER`, `HC_NOTIFY_REQUEST_FINISH`, `HC_INJECT_MSI`, and
+   `HC_SET_IRQLINE`.
+4. Add the Service VM Linux userspace/kernel side needed to expose
+   `/dev/acrn_hsm` or `/dev/acrn_vhm` and translate the ACRN ioctls used by
+   `acrn-dm` into ARM64 hypercalls.
+5. Add an ARM64 raw-image loader path to `sdk/udev` for Android. The existing
+   `-k` path enters the x86 bzImage loader, so Android needs a separate loader
+   that copies an ARM64 `Image`, Android ramdisk, and DTB into guest RAM, sets
+   vCPU0 entry to the kernel load address, and enters the ARM64 boot ABI with
+   `x0` pointing at the guest DTB.
+6. Start with a minimal Android ramdisk acceptance target: Android kernel logs
+   appear on PL011, `/init` starts, and `androidboot.*` boot parameters are
+   visible before requiring full `system`, `vendor`, or `userdata` mounts.
+7. Add virtual devices only after the minimal Android init path works. The first
+   required devices are `virtio-blk` for Android partitions and a console path;
+   `virtio-net`, `virtio-input`, `virtio-gpu`, RPMB, and Trusty should follow as
+   separate enablement steps.
+
+A future Android launch command should be shaped like ACRN-DM rather than the
+current static QEMU loader:
+
+```bash
+acrn-dm \
+  -m 2048M \
+  --cpu_affinity 1,2,3,4 \
+  --arm64_dtb sdk/image/android/beau-android.dtb \
+  -k sdk/image/android/Image \
+  -r sdk/image/android/ramdisk.cpio.gz \
+  -B "console=ttyAMA0 earlycon=pl011,0x09000000 loglevel=7 androidboot.console=ttyAMA0" \
+  -s 2,virtio-blk,sdk/image/android/super.img \
+  -s 3,virtio-blk,sdk/image/android/userdata.img \
+  Android
+```
+
+The `--arm64_dtb` option does not exist yet; it represents the intended
+`sdk/udev` interface for the ARM64 Android loader. Until that path exists, the
+fastest debug-only experiment remains replacing the current VM2 Linux
+`Image`/`Initramfs.cpio.gz`/DTB inputs with Android kernel and ramdisk assets,
+but that is only a kernel/DTB/timer/GIC/PL011 smoke test and is not the final
+ACRN-DM Android launch model.
+
 ## Next Steps
 
-1. Add longer/repeated VM2 Linux stress coverage around
+1. Preserve the current QEMU 3OS baseline before the Android phase. Add
+   longer/repeated VM2 Linux stress coverage around
    `--stress-vsh-switch --stress-rounds 4 --stress-enters 80
    --no-terminal-replies`, including repeated cold boots, to age the current
    PPI27 priority-mask plus no-op-reschedule fix.
@@ -1271,7 +1338,12 @@ virtualization port.
    from data abort MMIO paths, document the expected ESR/FAR/HPFAR trigger
    scenarios, and update comments so instruction abort, data abort, and broader
    memory abort terminology are not conflated.
-6. Move QEMU platform memory and device discovery toward host-FDT-derived data
+6. Start the ACRN-DM Android bring-up by creating a Linux-Service-VM QEMU
+   scenario variant and defining the minimal ARM64 HSM/ioctl/hypercall contract
+   needed by `sdk/udev`.
+7. Add the ARM64 raw-image Android loader interface to `sdk/udev`, including an
+   explicit DTB argument and vCPU0 register setup for the ARM64 boot ABI.
+8. Move QEMU platform memory and device discovery toward host-FDT-derived data
    where it helps reduce static board assumptions.
-7. Bring up rk356x hardware manually, then capture the validated RAM, UART,
+9. Bring up rk356x hardware manually, then capture the validated RAM, UART,
    GIC, and boot-image placement assumptions back into the platform files.

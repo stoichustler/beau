@@ -120,6 +120,8 @@ bool start_pcpus(uint64_t mask)
 		if (!is_pcpu_active(i)) {
 			pr_fatal("secondary cpu%hu failed to come up", i);
 			pcpu_set_current_state(i, PCPU_STATE_DEAD);
+		} else {
+			pr_info("MP: secondary cpu%hu up", i);
 		}
 
 		i = ffs64(expected_start_mask);

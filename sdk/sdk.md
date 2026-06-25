@@ -1271,6 +1271,105 @@ Feasible next repair:
   `apb_pclk` did not affect VM2. VM2 uses the embedded
   `sdk/image/linux/beau-linux.dtb`, whose DTS already has both clocks.
 
+### Current WDT/vtimer Progress, 2026-06-26
+
+Current user-visible status:
+
+- VM1 LK keeps kicking the BEAU watchdog.
+- VM0 Zephyr can kick several times, then its watchdog path can stop.
+- VM2 Linux still normally kicks only once.
+- The Linux BEAU watchdog driver is not the likely root cause. The common
+  failing boundary remains BEAU's CNTV/PPI27 to vGIC/LR delivery model.
+
+Observed timer/interrupt ownership:
+
+```text
+CNTV deadline/ISTAT
+        │
+        ▼
+EL2 vtimer source sampler
+        │
+        ▼
+VGIC descriptor: pending/active/level
+        │
+        ▼
+ICH list register + CPU interface state
+        │
+        ▼
+guest IAR/EOIR/DIR and timer handler
+```
+
+- VM2 Linux uses guest-visible virtual timer INTID/PPI27. Current evidence does
+  not support changing the Linux DTS timer interrupt.
+- Zephyr should also be treated as a PPI27/CNTV guest in the current model.
+  The earlier PPI27/PPI30 confusion has been corrected conceptually: PPI30 is
+  the EL2 physical timer source and must remain host-owned.
+- Linux failing dumps place vCPUs around the instruction after `wfi` in
+  `cpu_do_idle()`: Linux was woken from WFI, but it has not progressed far
+  enough to run the timer handler/softirq path.
+- Representative dumps show guest virq27 pending/level, host PPI27 enabled, and
+  shadow/live LR divergence. One useful pattern is a shadow pending HW timer LR
+  while the live LR has become invalid without clear guest EOI evidence.
+- Host PPI27 active-bit synchronization, live PMR synchronization, pre-ERET
+  vtimer/vGIC refresh, and keeping PPI27 enabled while masking host priority
+  were all useful diagnostics, but none is a proven fix for Linux WDT.
+
+Reference-model findings to preserve:
+
+- Timer expiry should be treated as a source line that feeds the vGIC model,
+  not as an ad hoc wakeup side channel.
+- On every relevant exit/sync point, rebuild software state from the live list
+  registers before deciding whether an IRQ was delivered, lost, still pending,
+  or already active.
+- Local SGI/PPI LRs may need different priority and active handling from SPIs,
+  but a priority-only local LR experiment compiled and still did not fix Linux.
+- WFI handling in the reference model is tied to the interrupt tracker and timer
+  source state. A broad "trap every WFI" experiment in BEAU caused many WFI
+  exits and still did not fix Linux, so keep WFI trapping as narrow diagnostic
+  plumbing rather than the main repair.
+
+Current local-tree status:
+
+- The vGICv3 ITS code has been split out of the main vGICv3 file in the local
+  tree. Treat that as organization, not as a WDT fix.
+- PPI27/CNTV is currently the only vtimer INTID recognized by the vtimer helper
+  path. CNTP/PPI30 remains reserved for the EL2 scheduler timer path.
+- The local tree contains extra diagnostics around host PPI27 state, LR state,
+  and vtimer/vGIC trace points. Keep these diagnostics until the WDT issue is
+  understood.
+- QEMU builds have passed after the recent local experiments, and a rk356x
+  build passed earlier in the investigation. The latest QEMU runtime check still
+  failed WDT progress, so no current patch should be described as accepted.
+
+Experiments now considered insufficient:
+
+- Repeated TWI rescue/rearm around lost pending-only LRs.
+- Globally enabling WFI trapping for normal guest idle loops.
+- Treating active-bit synchronization alone as the root fix.
+- Treating PMR synchronization alone as the root fix.
+- Lowering local SGI/PPI LR priority alone as the root fix.
+- Changing Linux watchdog code, Linux bootargs, or Linux timer DTS data.
+
+Next debug direction:
+
+1. Stop adding isolated rescue knobs until the vGIC/LR lifecycle is reconciled
+   with the reference model.
+2. Decide whether BEAU should keep the current hardware-backed PPI27 LR path or
+   switch CNTV/PPI27 to a software-emulated level LR model for all guests. The
+   decision should be based on live LR, AP, EOI/DIR, and host PPI27 evidence,
+   not on Linux watchdog behavior alone.
+3. If keeping hardware-backed PPI27, implement a small LR tracker that samples
+   live LRs after exits, records active/pending ownership explicitly, handles
+   pending+active for an already-active level timer, and clears state only on
+   real guest EOI/reprogram evidence.
+4. If switching to software-emulated timer delivery, keep CNTV as the timer
+   source but inject guest PPI27 through ordinary VGIC level semantics so
+   Zephyr, LK, and Linux share one clear path.
+5. Validate any next fix with repeated cold boots and watchdog progress from all
+   three VMs. A useful manual acceptance target is LK, Zephyr, and Linux all
+   continuing beyond at least 20 watchdog kicks without Linux RCU/timer-softirq
+   warnings.
+
 ## Code Commenting Guidelines
 
 New ARM64 virtualization code should use English comments for design intent,
@@ -1412,17 +1511,17 @@ ACRN-DM Android launch model.
 
 ## Next Steps
 
-1. Preserve the current QEMU 3OS baseline before the Android phase. Add
-   longer/repeated VM2 Linux stress coverage around
-   `--stress-vsh-switch --stress-rounds 4 --stress-enters 80
-   --no-terminal-replies`, including repeated cold boots, to age the current
-   PPI27 priority-mask plus no-op-reschedule fix.
-2. Keep using `constat 2`, `dumpstat 2`, `vcpus`, `schedstat`, and `irqstat` on
-   failures. If `constat 2` still shows empty input backlog, empty vUART RX, and
-   SPI33 not pending, continue focusing on VM2 timer/vGIC state rather than
-   host-to-guest console input.
-3. Add repeated cold-boot and initramfs-shell coverage for VM2 Linux 4-vCPU/SMP,
-   with diagnostics for timer, SGI, and pending/active LR state on failures.
+1. Finish the VM watchdog/vtimer issue before treating the QEMU 3OS baseline as
+   stable for the Android phase. The current local tree still shows VM2 Linux
+   usually kicking WDT only once, and VM0 Zephyr can also stop after a few
+   kicks.
+2. On the next failure, keep using `constat 2`, `dumpstat 2`, `vcpus`,
+   `schedstat`, and `irqstat`. If `constat 2` still shows empty input backlog,
+   empty vUART RX, and SPI33 not pending, continue focusing on VM2/VM0
+   timer-vGIC state rather than host-to-guest console input.
+3. Reconcile BEAU's CNTV/PPI27 handling with the reference LR-tracker model.
+   Avoid more isolated TWI/rescue knobs until live LR, AP, EOI/DIR, host PPI27,
+   and software descriptor ownership are modeled consistently.
 4. Extend `scripts/regress.py` with more VM2 Linux initramfs-shell commands, reboot
    coverage, repeated cold boots, and saved log artifacts suitable for CI.
 5. Audit ARM64 abort handling to confirm whether guest instruction aborts are

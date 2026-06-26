@@ -211,18 +211,17 @@ static bool vcpu_has_pending_guest_irq(struct acrn_vcpu *vcpu)
 
 static void prepare_current_guest_resume(struct acrn_vcpu *vcpu)
 {
-	bool lr_rescue = vcpu->arch.vtimer_lr_rescue;
 	bool expired;
 
 	/*
 	 * Sample the live CNTV line before every ERET, update PPI27's level state,
 	 * and flush it into an LR if it is deliverable. This keeps CNTV/PPI27
-	 * deterministic and avoids relying on stale-LR rescue as the normal timer
+	 * deterministic and avoids relying on stale LR state as the normal timer
 	 * delivery path.
 	 */
 	arm64_vgicv3_update_current_vtimer(vcpu);
 	expired = arm64_vtimer_guest_expired(vcpu);
-	arm64_vtimer_diag_mark_pre_eret(vcpu, true, lr_rescue, expired);
+	arm64_vtimer_diag_mark_pre_eret(vcpu, true, expired);
 }
 
 static struct acrn_vcpu *schedule_without_guest_resume(uint16_t pcpu_id,
@@ -734,25 +733,6 @@ static int32_t handle_wfx(struct acrn_vcpu *vcpu)
 	 * can make forward progress to the unmask point.
 	 */
 	should_yield = is_wfe || (!request_pending && !pending_irq);
-	if (!is_wfe && vcpu->arch.vtimer_wfi_rescue) {
-		if (pending_irq && irq_masked) {
-			arm64_vgicv3_keep_vtimer_rescue(vcpu);
-			arm64_vgicv3_update_current_vtimer(vcpu);
-			if (vcpu->arch.vtimer_lr_rescue) {
-				arm64_vgicv3_keep_vtimer_rescue(vcpu);
-			}
-			/*
-			 * TWI is a one-shot wake assist for the WFI that raced an already
-			 * pending virtual timer. Once the timer LR has been preserved, let
-			 * EL1 run with architectural WFI semantics again; keeping TWI armed
-			 * turns a masked idle loop into repeated EL2 traps and can starve
-			 * Linux timer softirq progress.
-			 */
-			should_yield = false;
-		} else {
-			arm64_vgicv3_clear_vtimer_rescue(vcpu);
-		}
-	}
 
 	last->esr = vcpu->arch.regs.esr;
 	last->elr = vcpu->arch.regs.elr;
@@ -781,7 +761,7 @@ static int32_t handle_wfx(struct acrn_vcpu *vcpu)
 	/*
 	 * WFI itself is common and already has a last_wfx snapshot. Count the
 	 * interesting predicates here, but leave the trace ring for rarer edges such
-	 * as rescue arming or pending-only LR preservation.
+	 * as pending-only LR preservation.
 	 */
 	if (!is_wfe) {
 		vcpu->arch.debug.vtimer_diag.wfi_trap++;
@@ -794,12 +774,10 @@ static int32_t handle_wfx(struct acrn_vcpu *vcpu)
 	}
 
 	/*
-	 * This handler is normally reached only when a diagnostic or rescue path
-	 * enables WFI/WFE trapping. Keep the behavior lightweight: WFE yields, and
-	 * WFI yields only when no virtual event is visible. A masked pending IRQ
-	 * still has to return to EL1 so Linux can run out of the idle path and
-	 * unmask interrupts. Timer rescue uses TWI as a one-shot wake assist, then
-	 * preserves a pending LR while letting EL1 reach the unmask/IAR path.
+	 * This handler is normally reached only when a diagnostic enables WFI/WFE
+	 * trapping. Keep the behavior lightweight: WFE yields, and WFI yields only
+	 * when no virtual event is visible. A masked pending IRQ still has to return
+	 * to EL1 so Linux can run out of the idle path and unmask interrupts.
 	 */
 	if (should_yield) {
 		yield_current();

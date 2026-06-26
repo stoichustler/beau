@@ -276,7 +276,7 @@ void arm64_vcpu_trace_vtimer(struct acrn_vcpu *vcpu, uint32_t event,
 }
 
 void arm64_vtimer_diag_mark_pre_eret(struct acrn_vcpu *vcpu,
-	bool flushed, bool lr_rescue, bool masked_expired)
+	bool flushed, bool masked_expired)
 {
 	struct arm64_vcpu_vtimer_diag *diag;
 
@@ -287,9 +287,6 @@ void arm64_vtimer_diag_mark_pre_eret(struct acrn_vcpu *vcpu,
 	diag = &vcpu->arch.debug.vtimer_diag;
 	if (flushed) {
 		diag->pre_eret_flush++;
-		if (lr_rescue) {
-			diag->pre_eret_flush_lr_rescue++;
-		}
 		if (masked_expired) {
 			diag->pre_eret_flush_expired++;
 		}

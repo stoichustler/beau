@@ -42,8 +42,7 @@
  *   or explicit sync point and synchronized the vGIC timer line.
  * - INJECT/EOI/REQUEUE: guest-visible timer PPI was injected, completed by
  *   EOI, or requeued after timer/vGIC state changed.
- * - BACKUP/WFI: rescue paths for a running or sleeping vCPU whose timer could
- *   otherwise stay hidden behind a masked host PPI or stale LR.
+ * - BACKUP: offline backup timer for an unloaded vCPU.
  * - PENDING_LR/LOST_LR/MASK/STALL: diagnostics for LR ownership and host PPI
  *   masking when investigating lost or repeated timer interrupts.
  *
@@ -62,7 +61,7 @@
 #define ARM64_VTIMER_TRACE_EOI			8U
 #define ARM64_VTIMER_TRACE_REQUEUE		9U
 #define ARM64_VTIMER_TRACE_BACKUP		10U
-#define ARM64_VTIMER_TRACE_WFI			11U
+#define ARM64_VTIMER_TRACE_WFI			11U /* reserved */
 #define ARM64_VTIMER_TRACE_PENDING_LR		12U
 #define ARM64_VTIMER_TRACE_LOST_LR		13U
 #define ARM64_VTIMER_TRACE_MASK			14U
@@ -393,7 +392,6 @@ struct arm64_vcpu_vtimer_diag {
 	uint64_t wfi_trap;
 	uint64_t wfi_irq_masked;
 	uint64_t wfi_pending_irq;
-	uint64_t wfi_rescue_arm;
 	/*
 	 * pending-only LR flow tracks the QEMU-sensitive path where a timer LR can
 	 * wake WFI but disappear before Linux acknowledges PPI27. preserve means
@@ -417,9 +415,7 @@ struct arm64_vcpu_vtimer_diag {
 	 * can be hot and would otherwise overwrite rarer pending-only LR evidence.
 	 */
 	uint64_t pre_eret_flush;
-	uint64_t pre_eret_flush_lr_rescue;
 	uint64_t pre_eret_flush_expired;
-	uint64_t lr_rescue_budget_exhaust;
 	uint64_t max_el2_mask_ticks;
 	uint64_t el2_mask_since_ticks;
 };
@@ -457,12 +453,8 @@ struct acrn_vcpu_arch {
 	uint64_t irqs_pending_mask;
 	struct hv_timer cntv_timer;
 	struct hv_timer cntp_timer;
-	uint8_t vtimer_lr_rescue_budget;
 	bool cntv_timer_initialized;
 	bool cntp_timer_initialized;
-	bool cntv_timer_rescue_armed;
-	bool vtimer_wfi_rescue;
-	bool vtimer_lr_rescue;
 } __aligned(PAGE_SIZE);
 
 struct acrn_vcpu;
@@ -476,7 +468,7 @@ uint64_t arm64_vcpu_trace_guest_boundary(struct acrn_vcpu *vcpu, uint8_t event,
 void arm64_vcpu_trace_vtimer(struct acrn_vcpu *vcpu, uint32_t event,
 	uint32_t virq, uint32_t ctl, uint64_t cval, bool write, bool injected);
 void arm64_vtimer_diag_mark_pre_eret(struct acrn_vcpu *vcpu,
-	bool flushed, bool lr_rescue, bool masked_expired);
+	bool flushed, bool masked_expired);
 
 #endif /* ASSEMBLER */
 

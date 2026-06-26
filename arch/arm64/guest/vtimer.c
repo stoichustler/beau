@@ -83,9 +83,6 @@
  * The field gctx->timer_virq is kept only as a debug/compatibility hint for
  * older dump paths. The timer delivery model itself does not depend on it.
  */
-#define	VTIMER_STUCK_RESCUE_US			500U
-#define	VTIMER_LR_RESCUE_RESCHED_BUDGET	4U
-
 #define SYSREG_ENC(op0, op1, crn, crm, op2) \
 	(((op0) << 20U) | ((op2) << 17U) | ((op1) << 14U) | ((crn) << 10U) | ((crm) << 1U))
 #define SYSREG_CNTP_CTL_EL0		SYSREG_ENC(3UL, 3UL, 14UL, 2UL, 1UL)
@@ -96,8 +93,6 @@
 #define SYSREG_CNTV_CVAL_EL0		SYSREG_ENC(3UL, 3UL, 14UL, 3UL, 2UL)
 #define SYSREG_CNTV_TVAL_EL0		SYSREG_ENC(3UL, 3UL, 14UL, 3UL, 0UL)
 #define SYSREG_CNTVCT_EL0		SYSREG_ENC(3UL, 3UL, 14UL, 0UL, 2UL)
-
-static void vtimer_arm_wfi_rescue(struct acrn_vcpu *vcpu);
 
 static uint64_t vtimer_virtual_now(const struct arm64_vcpu_guest_ctx *gctx)
 {
@@ -631,13 +626,6 @@ int32_t arm64_vtimer_handle_sysreg(struct acrn_vcpu *vcpu, uint64_t sysreg,
 	return ret;
 }
 
-void arm64_vtimer_arm_wfi_rescue(struct acrn_vcpu *vcpu)
-{
-	if (vcpu != NULL) {
-		vtimer_arm_wfi_rescue(vcpu);
-	}
-}
-
 static void cntv_timer_disarm(struct acrn_vcpu *vcpu)
 {
 	if ((vcpu != NULL) && vcpu->arch.cntv_timer_initialized) {
@@ -645,7 +633,6 @@ static void cntv_timer_disarm(struct acrn_vcpu *vcpu)
 			del_timer(&vcpu->arch.cntv_timer);
 		}
 		update_timer(&vcpu->arch.cntv_timer, 0UL, 0UL);
-		vcpu->arch.cntv_timer_rescue_armed = false;
 	}
 }
 
@@ -663,7 +650,6 @@ static void cntv_timer_arm(struct acrn_vcpu *vcpu)
 	 * pCPU, so EL2 arms a host timer for the saved CNTV deadline and later
 	 * rebuilds a normal PPI27 injection if the deadline expires.
 	 */
-	vcpu->arch.cntv_timer_rescue_armed = false;
 	gctx = &vcpu->arch.gctx;
 	deadline = vtimer_virtual_deadline(gctx, gctx->cntv_cval_el0);
 	if (!vtimer_ctl_enabled(gctx->cntv_ctl_el0) ||
@@ -678,80 +664,6 @@ static void cntv_timer_arm(struct acrn_vcpu *vcpu)
 	update_timer(&vcpu->arch.cntv_timer, deadline, 0UL);
 	if (add_timer(&vcpu->arch.cntv_timer) != 0) {
 		update_timer(&vcpu->arch.cntv_timer, 0UL, 0UL);
-	}
-}
-
-static void cntv_timer_arm_stuck_rescue(struct acrn_vcpu *vcpu)
-{
-	uint64_t deadline;
-
-	if ((vcpu == NULL) || !vcpu->arch.cntv_timer_initialized) {
-		return;
-	}
-	if (vcpu->arch.cntv_timer_rescue_armed) {
-		return;
-	}
-
-	/*
-	 * Stuck rescue is a short watchdog for the loaded-vCPU path: CNTV is
-	 * already expired and host-masked, but guest acknowledgement has not made
-	 * progress. The handler rechecks the live line before forcing a WFI trap.
-	 */
-	deadline = cpu_ticks() + us_to_ticks(VTIMER_STUCK_RESCUE_US);
-	if (timer_is_started(&vcpu->arch.cntv_timer)) {
-		del_timer(&vcpu->arch.cntv_timer);
-	}
-	update_timer(&vcpu->arch.cntv_timer, deadline, 0UL);
-	if (add_timer(&vcpu->arch.cntv_timer) != 0) {
-		update_timer(&vcpu->arch.cntv_timer, 0UL, 0UL);
-		vcpu->arch.cntv_timer_rescue_armed = false;
-	} else {
-		vcpu->arch.cntv_timer_rescue_armed = true;
-	}
-}
-
-static void vtimer_arm_wfi_rescue(struct acrn_vcpu *vcpu)
-{
-	/*
-	 * TWI is used only to catch the next guest WFI and give EL2 one bounded
-	 * chance to rebuild a pending timer LR before Linux idles again.
-	 */
-	vcpu->arch.debug.vtimer_diag.wfi_rescue_arm++;
-	vcpu->arch.vtimer_wfi_rescue = true;
-	vcpu->arch.gctx.hcr_el2 |= HCR_TWI;
-	if (get_running_vcpu(get_pcpu_id()) == vcpu) {
-		write_hcr_el2(vcpu->arch.gctx.hcr_el2);
-	}
-	arm64_vcpu_trace_vtimer(vcpu, ARM64_VTIMER_TRACE_WFI,
-		ARM64_GIC_PPI_VIRTUAL_TIMER, UINT32_MAX, UINT64_MAX, false, true);
-}
-
-static void vtimer_keep_rescue(struct acrn_vcpu *vcpu)
-{
-	/*
-	 * Once a pending-only timer LR exists, the rescue owner is the LR rather
-	 * than TWI. Keep a small no-reschedule budget so EL1 can reach daifclr.
-	 */
-	vcpu->arch.vtimer_wfi_rescue = false;
-	if (!vcpu->arch.vtimer_lr_rescue) {
-		vcpu->arch.vtimer_lr_rescue_budget = VTIMER_LR_RESCUE_RESCHED_BUDGET;
-	}
-	vcpu->arch.vtimer_lr_rescue = true;
-	vcpu->arch.gctx.hcr_el2 &= ~HCR_TWI;
-	if (get_running_vcpu(get_pcpu_id()) == vcpu) {
-		write_hcr_el2(vcpu->arch.gctx.hcr_el2);
-	}
-}
-
-static void vtimer_clear_rescue(struct acrn_vcpu *vcpu)
-{
-	/* Timer delivery is either complete or no longer due; release all rescue state. */
-	vcpu->arch.vtimer_wfi_rescue = false;
-	vcpu->arch.vtimer_lr_rescue = false;
-	vcpu->arch.vtimer_lr_rescue_budget = 0U;
-	vcpu->arch.gctx.hcr_el2 &= ~HCR_TWI;
-	if (get_running_vcpu(get_pcpu_id()) == vcpu) {
-		write_hcr_el2(vcpu->arch.gctx.hcr_el2);
 	}
 }
 
@@ -790,21 +702,7 @@ static void cntv_timer_handler(void *data)
 	if ((vcpu == NULL) || (vcpu->vm == NULL) || (vcpu->state != VCPU_RUNNING)) {
 		return;
 	}
-	vcpu->arch.cntv_timer_rescue_armed = false;
 	if (get_running_vcpu(get_pcpu_id()) == vcpu) {
-		/*
-		 * Loaded-vCPU backup is a watchdog only. The live CNTV line remains
-		 * authoritative, so recheck the stuck condition before trapping WFI.
-		 */
-		if (!arm64_vgicv3_timer_live_stuck(vcpu)) {
-			return;
-		}
-		gctx = &vcpu->arch.gctx;
-		ctl = gctx->cntv_ctl_el0;
-		cval = gctx->cntv_cval_el0;
-		arm64_vcpu_trace_vtimer(vcpu, ARM64_VTIMER_TRACE_BACKUP,
-			ARM64_GIC_PPI_VIRTUAL_TIMER, ctl, cval, false, false);
-		vtimer_arm_wfi_rescue(vcpu);
 		return;
 	}
 
@@ -855,24 +753,9 @@ void arm64_vtimer_cancel_all(struct acrn_vcpu *vcpu)
 	cntp_timer_disarm(vcpu);
 }
 
-void arm64_vgicv3_keep_vtimer_rescue(struct acrn_vcpu *vcpu)
-{
-	if (vcpu != NULL) {
-		vtimer_keep_rescue(vcpu);
-	}
-}
-
-void arm64_vgicv3_clear_vtimer_rescue(struct acrn_vcpu *vcpu)
-{
-	if (vcpu != NULL) {
-		vtimer_clear_rescue(vcpu);
-	}
-}
-
 void arm64_vgicv3_update_current_vtimer(struct acrn_vcpu *vcpu)
 {
 	bool level;
-	bool rescue;
 
 	if ((vcpu == NULL) || (vcpu->vm == NULL) || (get_running_vcpu(get_pcpu_id()) != vcpu)) {
 		return;
@@ -884,19 +767,13 @@ void arm64_vgicv3_update_current_vtimer(struct acrn_vcpu *vcpu)
 	/*
 	 * Update path at a bounded EL2 sync point:
 	 *
-	 *   live CNTV sample -> vGIC timer line -> optional rescue watchdog
+	 *   live CNTV sample -> vGIC timer line
 	 */
 	level = arm64_vtimer_sample_current(vcpu);
 	arm64_vgicv3_sync_current_timer_line(vcpu, level);
 	if (level || vcpu->arch.gctx.cntv_el2_masked) {
 		arm64_vcpu_trace_vtimer(vcpu, ARM64_VTIMER_TRACE_UPDATE,
 			ARM64_GIC_PPI_VIRTUAL_TIMER, UINT32_MAX, UINT64_MAX, false, false);
-	}
-
-	rescue = arm64_vgicv3_timer_live_stuck(vcpu);
-	if (rescue) {
-		vtimer_arm_wfi_rescue(vcpu);
-		cntv_timer_arm_stuck_rescue(vcpu);
 	}
 }
 

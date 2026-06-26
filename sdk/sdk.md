@@ -436,8 +436,8 @@ captures during boot, reboot, or VM2 latency work:
   - `thread`: scheduler thread state.
   - `cur`: whether this vCPU thread is currently selected on its pCPU.
   - `req-mask`: pending vCPU request bits.
-  - `diag`: quick hints such as `cpu-wait`, `rtds-depleted`,
-    `rtds-overrun`, and `vtimer-rescue`.
+  - `diag`: quick hints such as `cpu-wait`, `rtds-depleted`, and
+    `rtds-overrun`.
   - `timer`: guest virtual timer state saved in the vCPU context.
   - `cpuif`: saved vGIC CPU-interface state and LR usage.
 - `dumpstat` vCPU header:
@@ -494,10 +494,10 @@ captures during boot, reboot, or VM2 latency work:
   calls or vCPU event requests to redeliver RX interrupts. Guest UART MMIO exits
   on an already asserted line refresh the current vGIC LR in place so active RX
   interrupts can become active+pending without a remote wakeup storm.
-- ARM64 vtimer stuck rescue has diagnostic plumbing for the pending-only timer
-  LR case where Linux reaches idle with EL1 IRQs still masked and CNTV remains
-  host-masked. This path is still under active investigation; it is not yet a
-  proven stability fix for VM2 Linux held-Enter/vsh-switch stress.
+- ARM64 vtimer diagnostics keep pending-only timer LR counters for the case
+  where Linux reaches idle with EL1 IRQs still masked and CNTV remains
+  host-masked. The old timer LR/WFI rescue state has been removed; CNTV/PPI27
+  now follows ordinary vGIC software level delivery.
 - ARM64 vPL011 vio for guest PL011 MMIO and RX interrupt notification.
 - ARM64 vPL011 avoids running the vGIC level-deassert path for ordinary PL011
   polling reads, especially Linux's frequent `FR` reads around console output.
@@ -806,11 +806,10 @@ guest-exit path.
 4. Every pCPU initializes its Redistributor and CPU interface. Local host
    enables include SGI0, PPI25, and PPI27. PPI26 is enabled by the host timer
    init path.
-5. Host priority masking is used for the virtual timer rescue path: while a
-   virtual timer LR owns guest delivery, PPI27 stays enabled but priority is
-   dropped to `0xff` so the host does not repeatedly take PPI27. Do not disable
-   PPI27 at the Redistributor as a replacement for this, because the QEMU CPU
-   model can then make Linux-visible CNTV ISTATUS unreliable.
+5. CNTV/PPI27 is the physical source event for guest virtual timer delivery.
+   Do not disable PPI27 at the Redistributor as a replacement for vGIC level
+   tracking, because the QEMU CPU model can then make Linux-visible
+   CNTV_CTL.ISTATUS unreliable.
 
 ### vIRQ API Flow
 
@@ -864,8 +863,8 @@ Important rules:
 - Do not mark every pending-only timer LR as EOI-maintained. That produced
   maintenance storms because a still-high CNTV level source immediately rebuilt
   the same LR.
-- Do not manufacture Active+Pending for the vtimer rescue path. That can model
-  an interrupt acknowledgement that EL1 has not actually performed.
+- Do not manufacture Active+Pending for a pending-only vtimer LR. That can
+  model an interrupt acknowledgement that EL1 has not actually performed.
 - GICD/GICR MMIO windows must stay vio/MMIO, not stage-2 RAM mappings. A
   stage-2 data abort is the intended dispatch path for guest
   interrupt-controller register access.
@@ -886,9 +885,10 @@ BEAU separates host timekeeping from guest timer ABI:
    the CNTV path. Guest CNTP/PPI30 is separate software emulation and must not
    share the live CNTV/PPI27 delivery state.
 4. Host masking:
-   After CNTV expires and a timer LR is in flight, BEAU masks the host PPI27 by
-   priority only and keeps guest CNTV shadow state separate. Linux must still
-   be able to observe an architecturally expired timer.
+   After CNTV expires and the vGIC owns the guest-visible timer line, BEAU masks
+   the live CNTV comparator with CNTV_CTL.IMASK and keeps guest CNTV shadow state
+   separate. Linux must still be able to observe an architecturally expired
+   timer.
 5. Reprogram/EOI:
    When the guest moves CVAL to the future, masks/disables CNTV, or EOIs a
    timer LR, VGICv3 samples live CNTV and lowers or keeps the software level
@@ -897,11 +897,10 @@ BEAU separates host timekeeping from guest timer ABI:
    If a vCPU is switched out with a future timer deadline, VGICv3 can arm a
    host backup timer. The backup injects the same guest timer PPI only if the
    vCPU is still offline and the deadline is due.
-7. Stuck rescue:
-   The VM2 Linux stress issue centered on pending-only timer LRs around WFI.
-   The accepted narrow model preserves the pending-only LR, keeps PPI27 enabled
-   with low host priority, and gives Linux a bounded EL1 run window to leave
-   WFI and reach `daifclr`/`local_irq_enable()`.
+7. CNTV/PPI27 delivery:
+   CNTV is the physical event source for EL2, but guest PPI27 is delivered as
+   an ordinary software level LR. BEAU no longer creates a hardware-backed PPI27
+   LR or a separate LR/WFI rescue owner for the virtual timer.
 
 ### Scheduler Interaction
 
@@ -914,7 +913,7 @@ The scheduler should remain architecture-neutral:
 - `sched_clear_reschedule_if_current_only()` is intentionally narrow. ARM64 can
   call it before a guest return when the current non-idle object is the only
   runnable object on that pCPU. It clears a no-op tick request that would have
-  selected the same vCPU and consumed a pending timer rescue window.
+  selected the same vCPU.
 - Shared pCPUs still fall back to the configured scheduler's fairness model.
   Do not disable scheduler ticks to hide vtimer bugs.
 
@@ -939,14 +938,12 @@ Read the dump in this order:
    deadline is expired.
 4. Check LR0/LR1 and software descriptor state for the same INTID:
    pending-only, active, active+pending, enabled, pending bitmap.
-5. Check host PPI27 enabled/pending/active/priority. Expected rescue state keeps
-   PPI27 enabled with low priority, not disabled.
-6. Check `rescue:... lr:<yes|no> budget:N`. A repeatedly exhausted budget means
-   the guest is not reaching the normal timer handler window.
-7. For SGI/SMP stalls, compare source and target SGI debug fields. A delivered
+5. Check host PPI27 enabled/pending/active state. It is the EL2 source event,
+   not the guest-visible interrupt lifecycle.
+6. For SGI/SMP stalls, compare source and target SGI debug fields. A delivered
    SGI with no EOI evidence and Linux stuck in a CSD wait usually points to an
    edge lifecycle issue, not a timer issue.
-8. If `constat 2` shows empty host input backlog, empty vUART RX, and no PL011
+7. If `constat 2` shows empty host input backlog, empty vUART RX, and no PL011
    SPI33 pending, do not chase console input first; continue with vtimer/vGIC
    state.
 
@@ -1118,42 +1115,35 @@ Status as of 2026-06-18:
   the pending-only vtimer LR was present, but VM2/vCPU0 could still be
   preempted by host scheduling before Linux ran far enough past `cpu_do_idle+8`
   to execute `local_irq_enable()`/`daifclr`.
-- The current narrow fix adds a bounded ARM64 vGIC-only no-reschedule window
-  for rescued pending-only virtual timer LRs. While `vtimer_lr_rescue` is set
-  and saved guest PSTATE still has DAIF.I masked, the timer pending state can
-  block a few host `need_reschedule()` decisions so Linux gets a short EL1 run
-  window. After that small budget is consumed, scheduler fairness is restored so
-  a stuck timer line cannot monopolize a shared pCPU. `dumpstat` now prints this
-  as `rescue:... lr:<yes|no> budget:N`.
+- A bounded ARM64 vGIC-only no-reschedule window for pending-only virtual timer
+  LRs was tried and later removed from the submit direction. It improved the
+  theory around the WFI masked-IRQ window, but it kept a separate timer rescue
+  owner in BEAU that Xen does not need and did not solve VM2 WDT progress.
 - The next failing dumps after that change showed an expired CNTV deadline,
   `cntv_el2_masked:Y`, a pending-only timer LR, and no later timer sysreg write.
   A live CNTV_CTL sample could be `0x1` even though EL2 computed the deadline as
   expired. That points to this QEMU CPU model not reliably trapping EL1 CNTV_CTL
   reads and not reliably reporting ISTATUS while the physical PPI27 line is
-  disabled. The current repair therefore keeps PPI27 enabled and masks only its
-  host priority (`0xff`, below the host PMR threshold) while a virtual timer LR
-  owns delivery. When the guest reprograms/EOIs the timer, EL2 restores priority
-  `0x80`. Linux can still observe the architecturally expired CNTV timer, while
-  the host avoids repeated PPI27 IRQs.
+  disabled. The current repair keeps CNTV/PPI27 as the EL2 source event but
+  delivers guest PPI27 as a vGIC software level LR. Linux can still observe the
+  architecturally expired CNTV timer, while BEAU avoids binding guest timer
+  lifecycle to a hardware PPI27 LR.
 - The core scheduling follow-up adds a narrow no-op reschedule clear:
   `sched_clear_reschedule_if_current_only()` clears `NEED_RESCHEDULE` only when
   the current non-idle thread is the only runnable/running non-blocking object
-  on that pCPU. In the ARM64 guest-return path this clear happens before the
-  vGIC pending-IRQ check, so VM2/vCPU0 on its private pCPU does not burn the
-  bounded virtual-timer LR rescue budget on a scheduler tick that would have
-  selected the same thread. Shared pCPUs still keep the bounded pending-IRQ
-  window and then fall back to the configured scheduler's fairness model.
+  on that pCPU. This remains a narrow scheduler hygiene change, but the timer
+  fix must live in the ARM64 vtimer/vGIC lifecycle rather than in a rescue
+  budget layered on top of scheduling.
 - A later two-layer experiment added a stronger BVT urgent boost for vtimer
   events and raised `VTIMER_LR_RESCUE_RESCHED_BUDGET` from 4 to 16. It did not
   remove the VM2 RCU stall under the pressure gate and expanded common scheduler
   ABI without proving root-cause coverage. Keep that experiment reverted in
   submit-ready patches.
-- The retained narrow code experiment is an ARM64-local final flush before
-  returning to EL1: when `vtimer_lr_rescue` is active, or CNTV is still
-  EL2-masked and expired, refresh the current vtimer and flush the current vGIC
-  LRs under the VM vGIC lock immediately before ERET. This is not a complete
-  fix by itself, but it is a useful low-risk sync point because it removes the
-  "software pending but not resident in an LR at return" failure class.
+- The retained narrow code path is an ARM64-local final refresh before returning
+  to EL1: sample the current CNTV line, update the vGIC timer descriptor, and
+  flush current LRs immediately before ERET. This is compatible with the Xen
+  model because the guest-visible PPI27 line is rebuilt from software vGIC state
+  at bounded EL2 sync points.
 - A dynamic tick-gating experiment reduced pCPU1 host timer callbacks
   but still failed the VM2 Linux stress path and changed timing rather than
   fixing the underlying vtimer/vGIC lifecycle.
@@ -1185,23 +1175,22 @@ experiment shows that scheduler preference alone is not sufficient. The root
 fix should preserve the virtual timer line across the pending-only-LR/WFI
 window and rebuild guest-visible delivery at bounded vGIC/vtimer sync points.
 
-Feasible next repair:
+Selected repair direction after comparing Xen:
 
-1. Keep `HCR_EL2.TWI` one-shot only. Do not leave WFI trapping enabled across
-   normal Linux idle loops.
-2. Keep the pre-ERET final vtimer/vGIC flush for the current vCPU when the
-   timer is in LR rescue or CNTV is EL2-masked and expired.
-3. Add a narrow second rescue condition, not a broad scheduler boost: if
-   `vtimer_lr_rescue` is set, saved guest DAIF.I is still masked, CNTV is
-   expired, the software vGIC timer descriptor is pending, and the live LR no
-   longer contains a pending timer entry after the bounded LR-rescue budget is
-   exhausted, arm one more TWI trap so the next WFI exits to EL2 and the timer
-   LR can be rebuilt.
-4. Clear that second rescue immediately once Linux EOIs/reprograms the timer,
-   CNTV moves to the future, or DAIF.I is observed unmasked.
-5. Keep common scheduler changes out of the submit patch unless a later log
-   proves VM2 vCPUs are runnable but not selected for a long enough interval to
-   explain the RCU warning.
+1. Do not keep extending TWI/LR rescue. A pending-only timer LR is normal vGIC
+   software level state, not a separate timer owner.
+2. Keep the pre-ERET vtimer/vGIC refresh so a loaded vCPU returns to EL1 with
+   current CNTV source state reflected in the software descriptor and LR array.
+3. Remove the hardware-backed PPI27 LR binding. CNTV/PPI27 is the EL2 physical
+   source event; guest PPI27 is delivered through ordinary vGIC software level
+   semantics.
+4. Keep guest CNTV_CTL shadow state separate from EL2's live CNTV IMASK. When
+   EL2 masks the physical comparator after sampling an expired CNTV, line
+   sampling must ignore only that EL2-owned mask, matching Xen's
+   `CNTV_CTL & ~MASK` logic.
+5. Keep common scheduler changes out of the timer fix unless later evidence
+   proves VM2 vCPUs are runnable but not selected for long enough to explain the
+   RCU warning.
 
 ### RCU Stall Repair Strategy
 
@@ -1216,8 +1205,7 @@ Feasible next repair:
    `vcpus`, `schedstat`, and `irqstat`.
 4. In `dumpstat 2`, compare vCPU0 against the other VM2 vCPUs: live CNTV_CTL,
    CNTV_CVAL, CNTVCT, `cntv_el2_masked`, timer virq, LR0/LR1, vGIC descriptor
-   pending/active/level bits, AP registers, host PPI27 state, and the
-   `rescue` LR budget.
+   pending/active/level bits, AP registers, and host PPI27 state.
 5. Fix in the ARM64 vGIC/vtimer lifecycle, not in Linux bootargs. The likely
    repair boundary is a narrow synchronization point where EL2 already knows a
    timer LR completed or a loaded vCPU is leaving/entering guest execution.
@@ -1312,8 +1300,9 @@ guest IAR/EOIR/DIR and timer handler
   shadow/live LR divergence. One useful pattern is a shadow pending HW timer LR
   while the live LR has become invalid without clear guest EOI evidence.
 - Host PPI27 active-bit synchronization, live PMR synchronization, pre-ERET
-  vtimer/vGIC refresh, and keeping PPI27 enabled while masking host priority
-  were all useful diagnostics, but none is a proven fix for Linux WDT.
+  vtimer/vGIC refresh, and keeping the live CNTV mask separate from guest
+  CNTV_CTL were all useful diagnostics, but none alone is a proven fix for Linux
+  WDT.
 
 Runtime check on 2026-06-26 17:40+08 after moving the host scheduler tick to
 CNTHP/hypervisor timer:
@@ -1382,11 +1371,16 @@ Current local-tree status:
 
 - The vGICv3 ITS code has been split out of the main vGICv3 file in the local
   tree. Treat that as organization, not as a WDT fix.
-- The vtimer helper recognizes both loaded guest CNTV/PPI27 and emulated guest
-  CNTP/PPI30. CNTHP/PPI26 remains reserved for the EL2 scheduler timer path.
+- The vtimer helper recognizes loaded guest CNTV/PPI27, emulated guest
+  CNTP/PPI30, and CNTHP/PPI26 as three separate roles. CNTHP remains reserved
+  for the EL2 scheduler timer path.
+- Guest CNTV/PPI27 now follows the Xen-style model: the physical CNTV interrupt
+  triggers EL2 to sample and mask the source, then vGIC injects guest PPI27 as a
+  software level LR. BEAU no longer sets `desc->hw`/`desc->pirq` for PPI27 and
+  no longer forces the physical PPI27 active bit before publishing LRs.
 - The local tree contains extra diagnostics around host PPI27 state, LR state,
-  and vtimer/vGIC trace points. Keep these diagnostics until the WDT issue is
-  understood.
+  and vtimer/vGIC trace points. Keep these diagnostics until the WDT fix is
+  validated.
 - QEMU builds have passed after the recent local experiments, and a rk356x
   build passed earlier in the investigation. The latest QEMU runtime check still
   failed WDT progress, so no current patch should be described as accepted.
@@ -1400,25 +1394,30 @@ Experiments now considered insufficient:
 - Lowering local SGI/PPI LR priority alone as the root fix.
 - Changing Linux watchdog code, Linux bootargs, or Linux timer DTS data.
 
-Next debug direction:
+Xen comparison and selected fix:
 
-1. Stop adding isolated rescue knobs until the vGIC/LR lifecycle is reconciled
-   with the reference model.
-2. Decide whether BEAU should keep the current hardware-backed PPI27 LR path or
-   switch CNTV/PPI27 to a software-emulated level LR model for all guests. The
-   decision should be based on live LR, AP, EOI/DIR, and host PPI27 evidence,
-   not on Linux watchdog behavior alone.
-3. If keeping hardware-backed PPI27, implement a small LR tracker that samples
-   live LRs after exits, records active/pending ownership explicitly, handles
-   pending+active for an already-active level timer, and clears state only on
-   real guest EOI/reprogram evidence.
-4. If switching to software-emulated timer delivery, keep CNTV as the timer
-   source but inject guest PPI27 through ordinary VGIC level semantics so
-   Zephyr, LK, and Linux share one clear path.
-5. Validate any next fix with repeated cold boots and watchdog progress from all
-   three VMs. A useful manual acceptance target is LK, Zephyr, and Linux all
-   continuing beyond at least 20 watchdog kicks without Linux RCU/timer-softirq
-   warnings.
+1. Xen programs CNTHP for the host scheduler timer and handles guest CNTV expiry
+   separately in `vtimer_interrupt()`.
+2. Xen masks the physical CNTV comparator on EL2 entry and injects a normal vGIC
+   line for the current vCPU. It does not use a hardware LR that binds guest
+   PPI27 to physical PPI27.
+3. Xen's vtimer update ignores the EL2-only mask bit when deciding whether the
+   guest-visible virtual timer line is asserted.
+4. BEAU should therefore keep CNTV as the source sampler and inject guest PPI27
+   through ordinary vGIC software level semantics. The code now removes the
+   PPI27 hardware LR special case, removes timer LR/WFI rescue owner state, and
+   lets normal LR sync/EOI/reprogram paths update the sampled level.
+
+Validation direction:
+
+1. Build QEMU BEAU and run `git diff --check` before runtime testing.
+2. Boot VM0/VM1/VM2 and confirm Linux WDT continues beyond the previous single
+   kick. Manual acceptance target: LK, Zephyr, and Linux all continue beyond at
+   least 20 watchdog kicks without Linux RCU/timer-softirq warnings.
+3. On failure, capture `vmstat`, `vcpus`, `schedstat`, `irqstat`, `dumpstat 2`,
+   and `constat 2`. Expected post-fix dumps should show no hardware-backed PPI27
+   LR and no timer rescue state; guest PPI27 state should be readable from the
+   software descriptor and LR state.
 
 ## Code Commenting Guidelines
 
@@ -1441,7 +1440,7 @@ ownership handoffs.
   guest context, switching between host IRQ and guest IRQ paths, and validating
   VM memory isolation.
 - For vGICv3/vtimer paths, comments should identify the owner at each step:
-  guest-visible CNTV/CNTP state, EL2 shadow state, host PPI27 masking, vGIC
+  guest-visible CNTV/CNTP state, EL2 shadow state, live CNTV IMASK, vGIC
   descriptor pending/active bits, pending bitmap scan state, and hardware LRs.
   Use a compact diagram when a fix crosses more than two of these owners.
 - For abort/trap handling code, comments must distinguish instruction aborts
@@ -1569,9 +1568,9 @@ ACRN-DM Android launch model.
    `schedstat`, and `irqstat`. If `constat 2` still shows empty input backlog,
    empty vUART RX, and SPI33 not pending, continue focusing on VM2/VM0
    timer-vGIC state rather than host-to-guest console input.
-3. Reconcile BEAU's CNTV/PPI27 handling with the reference LR-tracker model.
-   Avoid more isolated TWI/rescue knobs until live LR, AP, EOI/DIR, host PPI27,
-   and software descriptor ownership are modeled consistently.
+3. Reconcile BEAU's CNTV/PPI27 handling with the selected software level model.
+   Avoid more isolated TWI/rescue knobs; live LR, AP, EOI/DIR, host PPI27, and
+   software descriptor ownership must stay consistent.
 4. Extend `scripts/regress.py` with more VM2 Linux initramfs-shell commands, reboot
    coverage, repeated cold boots, and saved log artifacts suitable for CI.
 5. Audit ARM64 abort handling to confirm whether guest instruction aborts are

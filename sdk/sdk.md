@@ -1315,6 +1315,55 @@ guest IAR/EOIR/DIR and timer handler
   vtimer/vGIC refresh, and keeping PPI27 enabled while masking host priority
   were all useful diagnostics, but none is a proven fix for Linux WDT.
 
+Runtime check on 2026-06-26 17:40+08 after moving the host scheduler tick to
+CNTHP/hypervisor timer:
+
+- Reproduced the VM2 Linux failure. The BEAU WDT line reported
+  `event:timeout vm2: Linux status: stuck kick: 1` at about 40.2s. VM0 Zephyr
+  and VM1 LK continued to kick every 5s afterward, proving the BEAU shell,
+  watchdog thread, and WDT hypercall path were still alive.
+- `vmstat` showed all VM2 vCPUs still running/current on their pCPUs, not
+  blocked waiting for CPU time. VM2 vCPU0 and vCPU1 stayed on exclusive pCPUs,
+  and vCPU2/vCPU3 stayed current on their shared pCPUs. This rules out "Linux
+  did not get scheduled" as the first explanation for the missing second kick.
+- `schedstat` and `irqstat` showed an htimer ownership problem on VM2 pCPUs:
+  the htimer IRQ count stayed at 1 on pCPU1 and pCPU4, and stayed at 29/17 on
+  pCPU6/pCPU7 across later samples. In the same interval, htimer counts on
+  pCPU0/pCPU3/pCPU5 kept increasing by tens of thousands. The scheduler timer
+  counters for pCPU6/pCPU7 also stayed flat at 24/13 while their RTDS deadlines
+  were already overdue.
+- `irqstat` showed CNTV local IRQ delivery did not progress for VM2: total CNTV
+  IRQ count stayed at 4, with zero counts on VM2's pCPU1/pCPU4/pCPU6/pCPU7.
+- `dumpstat 2` showed each VM2 vCPU had an expired guest CNTV deadline, live
+  `CNTV_CTL` with enable+mask, `el2_masked:Y`, a vGIC timer line still
+  pending/level, and a timer LR present. Representative vCPU0 values:
+  `guest_delta:-11970241636`, `cntv_irq en:Y pend:N act:N`,
+  `vgic enabled:Y pending:Y active:N level:Y`, live LR0 pending, and
+  `el2-mask active:Y max-age.us:191500331`.
+- The guest trace had very large gaps between last resume and the next exit
+  on VM2 vCPUs, for example vCPU0 showed about 187.5s. That means EL1 was
+  running for a long time without another useful timer exit/EOI/reprogram
+  boundary, even though EL2 kept seeing the vGIC timer line as pending/level.
+- `constat 2` showed no input backlog and a full VM2 console ring. The VM2
+  console path was congested because Linux kept printing or had printed enough
+  to fill the ring, but there was no shell-input blockage causing the WDT miss.
+
+Conclusion from this run:
+
+- The single Linux WDT kick proves the WDT hypercall and BEAU WDT accounting
+  work at least once. The later timeout is not primarily a watchdog-driver or
+  hypercall-dispatch failure.
+- The failure chain is now more specific than "timer/vGIC issue": VM2 pCPUs do
+  not receive continuing htimer/CNTV local interrupts, while the vGIC timer line
+  remains stuck pending/level with EL2's live CNTV comparator masked. Guest EL1
+  keeps running but does not reach the timer EOI/reprogram path that would clear
+  the line and schedule the next Linux watchdog worker.
+- The next fix should focus on why VM2 pCPUs stop receiving local timer
+  interrupts and why the masked CNTV/vGIC timer line is not retired or
+  rearmed. Do not treat console backlog, VM2 CPU scheduling, or the Linux WDT
+  hypercall path as the primary root cause unless new evidence contradicts this
+  run.
+
 Reference-model findings to preserve:
 
 - Timer expiry should be treated as a source line that feeds the vGIC model,

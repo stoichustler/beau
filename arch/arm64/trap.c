@@ -29,10 +29,30 @@ void arm64_smp_call_irq_handler(__unused uint32_t irq, __unused void *data)
 
 static void unexpected_trap_handler(const struct intr_excp_ctx *ctx, uint64_t trap_type)
 {
-	printf("unexpected arm64 trap type:%lu esr:0x%lx elr:0x%lx far:0x%lx\r\n",
-		trap_type, ctx->regs.esr, ctx->regs.elr, ctx->regs.far);
+	char *exception = NULL;
+
+	switch (trap_type) {
+	case ARM64_TRAP_IRQ:
+		exception = "IRQ";
+		break;
+	case ARM64_TRAP_SYNC:
+		exception = "SYNC";
+		break;
+	case ARM64_TRAP_FIQ:
+		exception = "FIQ";
+		break;
+	case ARM64_TRAP_SERROR:
+		exception = "SABT";
+		break;
+	default:
+		exception = "N/A";
+		break;
+	}
+
+	printf("unexpected <%-4s> esr:0x%lx elr:0x%lx far:0x%lx\r\n",
+		exception, ctx->regs.esr, ctx->regs.elr, ctx->regs.far);
 	printf("──────────────── [end here] ────────────────\r\n");
-	printf("arm64 trap handled: auto reboot\r\n");
+	printf("method: auto reboot\r\n");
 	reset_host(false);
 }
 

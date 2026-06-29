@@ -117,13 +117,13 @@
 	.globl arm64_exception_vectors
 arm64_exception_vectors:
 	/* Current EL with SP0: synchronous, IRQ, FIQ, SError. */
-	b	arm64_sync_handler
+	b	.
 	.balign 0x80
-	b	arm64_irq_handler
+	b	.
 	.balign 0x80
-	b	arm64_fiq_handler
+	b	.
 	.balign 0x80
-	b	arm64_serror_handler
+	b	.
 
 	.balign 0x80
 	/* Current EL with SPx: normal EL2 host exceptions use these slots. */
@@ -146,14 +146,14 @@ arm64_exception_vectors:
 	b	arm64_guest_serror_handler
 
 	.balign 0x80
-	/* Lower EL AArch32 is not supported; route it to the host trap path. */
-	b	arm64_sync_handler
+	/* Lower EL AArch32 is not supported. */
+	b	.
 	.balign 0x80
-	b	arm64_irq_handler
+	b	.
 	.balign 0x80
-	b	arm64_fiq_handler
+	b	.
 	.balign 0x80
-	b	arm64_serror_handler
+	b	.
 
 	.balign 0x80
 arm64_sync_handler:

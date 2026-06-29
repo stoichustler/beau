@@ -1045,9 +1045,9 @@ static void shell_vmstat_vm_config(uint16_t vm_id, const struct acrn_vm_config *
 		timer.pre_eret_flush_expired, timer.pre_eret_flush,
 		timer.lost_pending_lr, vm->arch_vm.time_delta);
 	if (vm_wdt_get_snapshot(vm_id, &wdt) == 0) {
-		shell_item_line("wdt:status:%s kick:%lu age.ms:%lu token:0x%016lx",
+		shell_item_line("wdt:status:%s kick:%lu timeout:%lu age.ms:%lu token:0x%016lx",
 			shell_vmstat_wdt_status_to_str(wdt.status),
-			wdt.kick_count, wdt.age_ms, wdt.last_token);
+			wdt.kick_count, wdt.timeout_count, wdt.age_ms, wdt.last_token);
 	}
 	shell_item_line("console:selected:%s ring:%u/%u pending:%s",
 		shell_yes_no(console_vmid == vm_id), ring.queued,

@@ -17,7 +17,6 @@
 #include <acrn_common.h>
 #include <softirq.h>
 #include <ticks.h>
-#include <vm_wdt.h>
 #include <vm_config.h>
 #include <asm/platform.h>
 #include <asm/cpu.h>
@@ -996,7 +995,6 @@ void dispatch_vcpu_trap(struct cpu_regs *regs)
 	}
 
 	prepare_current_guest_resume(vcpu);
-	vm_wdt_activity(vcpu->vm);
 	record_vcpu_resume(vcpu, ARM64_VCPU_DEBUG_EXIT_SYNC);
 	restore_exit_regs(regs, vcpu);
 }
@@ -1042,7 +1040,6 @@ void dispatch_vcpu_irq(struct cpu_regs *regs)
 	}
 
 	prepare_current_guest_resume(vcpu);
-	vm_wdt_activity(vcpu->vm);
 	record_vcpu_resume(vcpu, ARM64_VCPU_DEBUG_EXIT_IRQ);
 	restore_exit_regs(regs, vcpu);
 }

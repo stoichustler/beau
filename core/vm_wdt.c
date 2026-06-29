@@ -21,11 +21,12 @@
 
 struct vm_wdt_entry {
 	uint64_t start_tsc;
-	uint64_t last_activity_tsc;
 	uint64_t last_kick_tsc;
 	uint64_t kick_count;
+	uint64_t timeout_count;
 	uint64_t last_token;
 	enum vm_wdt_status reported_status;
+	bool timeout_active;
 };
 
 static struct vm_wdt_entry vm_wdt_entries[CONFIG_MAX_VM_NUM];
@@ -44,6 +45,30 @@ static bool vm_wdt_config_present(const struct acrn_vm_config *vm_config)
 static uint64_t vm_wdt_elapsed_ticks(uint64_t now, uint64_t since)
 {
 	return (now >= since) ? (now - since) : 0UL;
+}
+
+static uint64_t vm_wdt_heartbeat_age_ticks(uint64_t now, const struct vm_wdt_entry *entry)
+{
+	uint64_t since = (entry->kick_count == 0UL) ? entry->start_tsc : entry->last_kick_tsc;
+
+	return vm_wdt_elapsed_ticks(now, since);
+}
+
+static bool vm_wdt_is_timeout_age(uint64_t age_ticks)
+{
+	return age_ticks > ((uint64_t)CONFIG_VM_WDT_TIMEOUT_MS * TICKS_PER_MS);
+}
+
+static void vm_wdt_record_timeout_locked(struct vm_wdt_entry *entry, bool timed_out)
+{
+	if (timed_out) {
+		if (!entry->timeout_active) {
+			entry->timeout_count++;
+			entry->timeout_active = true;
+		}
+	} else {
+		entry->timeout_active = false;
+	}
 }
 
 static const char *vm_wdt_status_str(enum vm_wdt_status status)
@@ -270,33 +295,12 @@ void vm_wdt_reset(const struct acrn_vm *vm)
 
 	spinlock_irqsave_obtain(&vm_wdt_lock, &rflags);
 	vm_wdt_entries[vm->vm_id].start_tsc = cpu_ticks();
-	vm_wdt_entries[vm->vm_id].last_activity_tsc = vm_wdt_entries[vm->vm_id].start_tsc;
 	vm_wdt_entries[vm->vm_id].last_kick_tsc = 0UL;
 	vm_wdt_entries[vm->vm_id].kick_count = 0UL;
+	vm_wdt_entries[vm->vm_id].timeout_count = 0UL;
 	vm_wdt_entries[vm->vm_id].last_token = 0UL;
 	vm_wdt_entries[vm->vm_id].reported_status = VM_WDT_STATUS_UNUSED;
-	spinlock_irqrestore_release(&vm_wdt_lock, rflags);
-}
-
-void vm_wdt_activity(const struct acrn_vm *vm)
-{
-	uint64_t rflags;
-	uint64_t now;
-	uint64_t last;
-
-	if ((vm == NULL) || (vm->vm_id >= CONFIG_MAX_VM_NUM)) {
-		return;
-	}
-
-	now = cpu_ticks();
-	last = vm_wdt_entries[vm->vm_id].last_activity_tsc;
-	if (vm_wdt_elapsed_ticks(now, last) <
-		((uint64_t)CONFIG_VM_WDT_ACTIVITY_SAMPLE_MS * TICKS_PER_MS)) {
-		return;
-	}
-
-	spinlock_irqsave_obtain(&vm_wdt_lock, &rflags);
-	vm_wdt_entries[vm->vm_id].last_activity_tsc = now;
+	vm_wdt_entries[vm->vm_id].timeout_active = false;
 	spinlock_irqrestore_release(&vm_wdt_lock, rflags);
 }
 
@@ -304,6 +308,7 @@ void vm_wdt_kick(const struct acrn_vm *vm, uint64_t token)
 {
 	uint64_t rflags;
 	uint64_t now;
+	uint64_t age_ticks;
 
 	if ((vm == NULL) || (vm->vm_id >= CONFIG_MAX_VM_NUM)) {
 		return;
@@ -311,9 +316,12 @@ void vm_wdt_kick(const struct acrn_vm *vm, uint64_t token)
 
 	now = cpu_ticks();
 	spinlock_irqsave_obtain(&vm_wdt_lock, &rflags);
-	vm_wdt_entries[vm->vm_id].last_activity_tsc = now;
+	age_ticks = vm_wdt_heartbeat_age_ticks(now, &vm_wdt_entries[vm->vm_id]);
+	vm_wdt_record_timeout_locked(&vm_wdt_entries[vm->vm_id],
+		vm_wdt_is_timeout_age(age_ticks));
 	vm_wdt_entries[vm->vm_id].last_kick_tsc = now;
 	vm_wdt_entries[vm->vm_id].kick_count++;
+	vm_wdt_entries[vm->vm_id].timeout_active = false;
 	vm_wdt_entries[vm->vm_id].last_token = token;
 	spinlock_irqrestore_release(&vm_wdt_lock, rflags);
 
@@ -336,6 +344,7 @@ int32_t vm_wdt_get_snapshot(uint16_t vm_id, struct vm_wdt_snapshot *snapshot)
 	snapshot->status = VM_WDT_STATUS_UNUSED;
 	snapshot->age_ms = 0UL;
 	snapshot->kick_count = 0UL;
+	snapshot->timeout_count = 0UL;
 	snapshot->last_token = 0UL;
 
 	vm_config = get_vm_config(vm_id);
@@ -355,18 +364,26 @@ int32_t vm_wdt_get_snapshot(uint16_t vm_id, struct vm_wdt_snapshot *snapshot)
 
 	now = cpu_ticks();
 	/*
-	 * A hypercall kick is the explicit guest heartbeat and is counted in the
-	 * log. Normal VM-exits are a weaker but still useful liveness signal: if
-	 * BEAU is still emulating the guest and vsh can interact with it, the VM
-	 * is not stuck even if the guest-side watchdog worker stopped scheduling.
+	 * A hypercall kick is the explicit guest heartbeat. Normal VM-exits can
+	 * continue while the guest watchdog worker is stuck, so they must not
+	 * refresh the timeout basis.
 	 */
-	age_ticks = vm_wdt_elapsed_ticks(now, entry.last_activity_tsc);
-	snapshot->status = (age_ticks <= ((uint64_t)CONFIG_VM_WDT_TIMEOUT_MS * TICKS_PER_MS)) ?
+	age_ticks = vm_wdt_heartbeat_age_ticks(now, &entry);
+	if (vm_wdt_is_timeout_age(age_ticks)) {
+		spinlock_irqsave_obtain(&vm_wdt_lock, &rflags);
+		age_ticks = vm_wdt_heartbeat_age_ticks(now, &vm_wdt_entries[vm_id]);
+		vm_wdt_record_timeout_locked(&vm_wdt_entries[vm_id],
+			vm_wdt_is_timeout_age(age_ticks));
+		entry = vm_wdt_entries[vm_id];
+		spinlock_irqrestore_release(&vm_wdt_lock, rflags);
+	}
+	snapshot->status = !vm_wdt_is_timeout_age(age_ticks) ?
 		((entry.kick_count == 0UL) ? VM_WDT_STATUS_UNKNOWN : VM_WDT_STATUS_ALIVE) :
 		VM_WDT_STATUS_STUCK;
 
 	snapshot->age_ms = ticks_to_ms(age_ticks);
 	snapshot->kick_count = entry.kick_count;
+	snapshot->timeout_count = entry.timeout_count;
 	snapshot->last_token = entry.last_token;
 
 	return 0;

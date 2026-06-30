@@ -27,6 +27,7 @@ struct console_vm_ring_stats {
 	uint64_t last_overflow_tsc;
 	bool pending;
 	bool draining;
+	bool vuart_bound;
 };
 
 struct console_vm_exception_stats {
@@ -86,6 +87,8 @@ bool console_vm_kick(void);
 bool console_vm_tx_put(uint16_t vmid, char ch);
 bool console_vm_rx_refill(struct acrn_vuart *vu);
 void console_vm_ring_drain(uint16_t vmid);
+bool console_vm_vuart_bind(uint16_t vmid);
+void console_vm_vuart_unbind(uint16_t vmid);
 bool console_vm_ring_get_stats(uint16_t vmid, struct console_vm_ring_stats *stats);
 bool console_vm_input_get_stats(struct console_vm_input_stats *stats);
 void console_vm_exception_log(uint16_t vmid, const char *buf, size_t len);

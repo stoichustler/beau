@@ -249,8 +249,8 @@ boot logs settle to show the `console:\>` prompt.
   - `vsh <vm id>`
 - Press Tab in the BEAU shell to display `registered commands`; `help` is not
   registered as a BEAU console command.
-- `vsh <vm id>` switches the serial console to a VM vPL011/vUART console.
-  Ctrl-D switches back to the BEAU shell.
+- `vsh <vm id>` binds the host vuart to a VM vPL011/vUART console.
+  Ctrl-D unbinds it and switches back to the BEAU shell.
 - `schedstat` prints the scheduler algorithm and one physical-CPU row with
   `pcpu`, scheduler `busy%`, `timer` callbacks, context `switches`, `resched`
   requests, runnable-thread count, and current `thread`. It also prints CPU
@@ -446,7 +446,10 @@ captures during boot, reboot, or VM2 latency work:
   - `affinity-config`: configured pCPU mask.
   - `runtime`: runtime pCPU mask currently held by the VM.
   - `root-s2`: whether the VM has a stage-2 root page table.
+  - `bound`: whether `vsh` has bound the host vuart to this VM console.
   - `ring`: queued VM console bytes versus ring capacity.
+  - `drain`: current bound-vuart output bytes allowed per console timer pass;
+    `0` means the VM is not bound to the host vuart.
   - `pending`: VM console output is waiting to be drained.
 - `vmstat` vCPU fields:
   - `sched`: scheduler class backing the vCPU thread.
@@ -473,16 +476,20 @@ captures during boot, reboot, or VM2 latency work:
   - `elr/esr/far/hpfar`: saved guest exception frame values.
 - ARM64 host exception call traces resolve return addresses through the
   embedded BEAU symbol table and print `function+offset` beside the raw LR.
-- VM vPL011 TX output from the currently selected `vsh` VM is written into a
-  Xen-style per-VM async console ring buffer, using monotonic producer/consumer
-  indexes and a 4KB power-of-two data area with 4095 bytes of usable capacity.
-  The console timer path runs every 5ms and drains up to
-  `CONFIG_VM_CONSOLE_DRAIN_BUDGET` bytes, default 512, to the host serial
-  console per pass. If the selected VM has at least half a ring of queued
-  output, the drain path can temporarily use
-  `CONFIG_VM_CONSOLE_DRAIN_BURST_BUDGET`, default 2048. This keeps `vsh 2` from
-  synchronously replaying a full Linux boot-log ring while still clearing deep
-  Linux console backlog faster than the first 128-byte drain experiment.
+- VM vPL011 TX output is written into a Xen-style per-VM async console receive
+  FIFO, using monotonic producer/consumer indexes and a 4KB power-of-two data
+  area with 4095 bytes of usable capacity. `vsh` binds the host vuart to one VM
+  console at a time; unbound VM output stays buffered until that VM is selected.
+  The console timer path runs every 5ms and drains the bound VM to the host
+  serial console with a small live-output slice. The raw slice starts from
+  `CONFIG_VM_CONSOLE_DRAIN_BUDGET`, default 512, or
+  `CONFIG_VM_CONSOLE_DRAIN_BURST_BUDGET`, default 2048, when the selected VM
+  has at least half a ring queued. It is then capped by
+  `CONFIG_VM_CONSOLE_INTERACTIVE_DRAIN_BUDGET`, default 256, so commands such as
+  `dmesg`, `cat`, or `find` cannot hold the physical serial path for a long
+  synchronous write. If host input was collected or remains queued in the same
+  pass, the cap drops to `CONFIG_VM_CONSOLE_INPUT_PENDING_DRAIN_BUDGET`, default
+  64, so Ctrl-D and typed commands get priority over guest TX backlog.
   Host-to-VM console input is first buffered in a small host backlog, then fed to
   the guest with `CONFIG_VM_CONSOLE_RX_BUDGET`, default 4 bytes per pass, and
   only while the guest RX FIFO is below `CONFIG_VM_CONSOLE_RX_LOW_WATERMARK`,

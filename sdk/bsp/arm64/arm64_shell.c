@@ -1085,9 +1085,10 @@ static void shell_vmstat_vm_config(uint16_t vm_id, const struct acrn_vm_config *
 			shell_vmstat_wdt_status_to_str(wdt.status),
 			wdt.kick_count, wdt.timeout_count, wdt.age_ms, wdt.last_token);
 	}
-	shell_item_line("console:selected:%s ring:%u/%u pending:%s",
-		shell_yes_no(console_vmid == vm_id), ring.queued,
-		ring.capacity, shell_yes_no(ring.pending));
+	shell_item_line("console:selected:%s bound:%s ring:%u/%u drain:%u pending:%s",
+		shell_yes_no(console_vmid == vm_id), shell_yes_no(ring.vuart_bound),
+		ring.queued, ring.capacity, ring.drain_budget,
+		shell_yes_no(ring.pending));
 
 	if (vu != NULL) {
 		shell_item_line("        vuart:active:%s irq:%u rx:%u tx:%u ier:0x%02x lsr:0x%02x",

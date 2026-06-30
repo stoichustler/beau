@@ -1779,15 +1779,19 @@ static int32_t shell_to_vm_console(int32_t argc, char **argv)
 	}
 
 	/*
-	 * Switch ownership first and let the periodic console path drain the VM ring.
-	 * Replaying a large boot buffer synchronously in the shell thread can block
-	 * the command path long enough to hide whether the VM console itself works.
+	 * Bind vsh as the single host vuart for this VM console. Guest output has
+	 * already been staged in the per-VM vuart receive FIFO; binding marks that
+	 * backlog pending for the periodic drain without adding a second command
+	 * path or a separate log viewer.
 	 */
 	snprintf(temp_str, TEMP_STR_SIZE, "\r\n──────── [switch to vm-%d shell] ────────\r\n", vm_id);
 	shell_puts(temp_str);
 	shell_set_input_active(false);
+	if (console_vmid != ACRN_INVALID_VMID) {
+		console_vm_vuart_unbind(console_vmid);
+	}
 	console_vmid = vm_id;
-	console_vm_ring_drain(vm_id);
+	(void)console_vm_vuart_bind(vm_id);
 
 	return 0;
 }

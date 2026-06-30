@@ -34,9 +34,9 @@
  *   VM id             -> that VM owns host input; its TX ring drains to host
  *
  * Guest TX does not write directly to the serial driver. vPL011/vUART pushes
- * bytes into a per-VM ring, and the periodic console kick drains only the
- * selected VM. Non-selected VMs keep buffering output for later diagnostics or
- * vsh replay, which prevents one noisy guest from stealing the BEAU shell.
+ * bytes into a per-VM receive FIFO. vsh binds the host vuart to one VM console
+ * at a time; unbound VMs keep buffering output until that vuart is bound again,
+ * which prevents one noisy guest from stealing the BEAU shell.
  */
 struct hv_timer console_timer;
 
@@ -72,6 +72,14 @@ struct hv_timer console_timer;
 #define CONFIG_VM_CONSOLE_DRAIN_BURST_THRESHOLD (CONFIG_VM_CONSOLE_RINGBUF_SIZE / 2U)
 #endif
 #define VM_CONSOLE_DRAIN_BURST_THRESHOLD CONFIG_VM_CONSOLE_DRAIN_BURST_THRESHOLD
+#ifndef CONFIG_VM_CONSOLE_INTERACTIVE_DRAIN_BUDGET
+#define CONFIG_VM_CONSOLE_INTERACTIVE_DRAIN_BUDGET 256U
+#endif
+#define VM_CONSOLE_INTERACTIVE_DRAIN_BUDGET CONFIG_VM_CONSOLE_INTERACTIVE_DRAIN_BUDGET
+#ifndef CONFIG_VM_CONSOLE_INPUT_PENDING_DRAIN_BUDGET
+#define CONFIG_VM_CONSOLE_INPUT_PENDING_DRAIN_BUDGET 64U
+#endif
+#define VM_CONSOLE_INPUT_PENDING_DRAIN_BUDGET CONFIG_VM_CONSOLE_INPUT_PENDING_DRAIN_BUDGET
 #ifndef CONFIG_VM_CONSOLE_RX_BUDGET
 #define CONFIG_VM_CONSOLE_RX_BUDGET 4U
 #endif
@@ -120,7 +128,10 @@ static spinlock_t console_log_lock;
  * pending marks queued bytes for shell diagnostics. draining prevents nested
  * timer/vsh paths from replaying the same VM stream concurrently. line_start,
  * last_cr, and terminal_query_* are host-serial presentation state used while
- * adding VM prefixes and hiding terminal cursor-position probes.
+ * adding VM prefixes and hiding terminal cursor-position probes. vuart_bound
+ * records whether vsh has bound the host vuart to this VM console; guest
+ * output is kept in the FIFO while unbound, then drained to the host when vsh
+ * binds.
  */
 struct vm_console_ringbuf {
 	spinlock_t lock;
@@ -137,6 +148,7 @@ struct vm_console_ringbuf {
 	bool draining;
 	bool line_start;
 	bool last_cr;
+	bool vuart_bound;
 	uint8_t terminal_query_len;
 	char terminal_query_buf[VM_CONSOLE_CPR_QUERY_LEN];
 	char buf[CONFIG_VM_CONSOLE_RINGBUF_SIZE];
@@ -171,12 +183,13 @@ static uint32_t vm_console_input_prod;
 static uint32_t vm_console_input_guest_budget;
 static uint16_t vm_console_input_vmid = ACRN_INVALID_VMID;
 static bool vm_console_input_last_enter;
+static bool vm_console_input_priority;
 static char vm_console_drain_buf[VM_CONSOLE_DRAIN_BUF_SIZE];
 static char vm_console_output_buf[VM_CONSOLE_DRAIN_BUF_SIZE + 128U];
 static const char vm_console_cpr_query[] = "\033[6n";
 static const char vm_console_cpr_reply[] = "\033[1;1R";
 
-static void console_vm_ring_put(uint16_t vmid, char ch);
+static void console_vm_vuart_receive(uint16_t vmid, char ch);
 static void console_vm_ring_drain_internal(uint16_t vmid);
 
 void console_init(void)
@@ -215,7 +228,7 @@ bool console_vm_tx_put(uint16_t vmid, char ch)
 	bool handled = false;
 
 	if (vmid < CONFIG_VM_CONSOLE_RINGBUF_VM_NUM) {
-		console_vm_ring_put(vmid, ch);
+		console_vm_vuart_receive(vmid, ch);
 		handled = true;
 	}
 
@@ -232,7 +245,7 @@ char console_getc(void)
 	return serial_getc();
 }
 
-static void console_vm_ring_put(uint16_t vmid, char ch)
+static void console_vm_vuart_receive(uint16_t vmid, char ch)
 {
 	struct vm_console_ringbuf *rb;
 	uint64_t rflags;
@@ -263,7 +276,7 @@ static void console_vm_ring_put(uint16_t vmid, char ch)
 			rb->high_water = queued;
 		}
 		rb->stored_bytes++;
-		rb->pending = true;
+		rb->pending = rb->vuart_bound;
 		spinlock_irqrestore_release(&rb->lock, rflags);
 	}
 }
@@ -271,6 +284,47 @@ static void console_vm_ring_put(uint16_t vmid, char ch)
 void console_vm_ring_drain(uint16_t vmid)
 {
 	console_vm_ring_drain_internal(vmid);
+}
+
+bool console_vm_vuart_bind(uint16_t vmid)
+{
+	struct vm_console_ringbuf *rb;
+	uint64_t rflags;
+	bool valid = false;
+
+	if (vmid < CONFIG_VM_CONSOLE_RINGBUF_VM_NUM) {
+		rb = &vm_console_ringbufs[vmid];
+		spinlock_irqsave_obtain(&rb->lock, &rflags);
+		/*
+		 * 2026-07-01, console-vuart binding principle:
+		 *
+		 *   vPL011 TX -> per-VM receive FIFO -> optional host vuart binding
+		 *
+		 * vsh is the single host vuart binding. Binding it marks existing
+		 * FIFO bytes pending so the timer/backend can drain backlog after
+		 * ownership is visible on the serial stream.
+		 */
+		rb->vuart_bound = true;
+		rb->pending = (rb->prod != rb->cons);
+		spinlock_irqrestore_release(&rb->lock, rflags);
+		valid = true;
+	}
+
+	return valid;
+}
+
+void console_vm_vuart_unbind(uint16_t vmid)
+{
+	struct vm_console_ringbuf *rb;
+	uint64_t rflags;
+
+	if (vmid < CONFIG_VM_CONSOLE_RINGBUF_VM_NUM) {
+		rb = &vm_console_ringbufs[vmid];
+		spinlock_irqsave_obtain(&rb->lock, &rflags);
+		rb->vuart_bound = false;
+		rb->pending = false;
+		spinlock_irqrestore_release(&rb->lock, rflags);
+	}
 }
 
 static uint32_t console_ring_queued(uint32_t prod, uint32_t cons, uint32_t capacity)
@@ -287,6 +341,7 @@ static void console_vm_input_reset(uint16_t vmid)
 	vm_console_input_prod = 0U;
 	vm_console_input_guest_budget = 0U;
 	vm_console_input_last_enter = false;
+	vm_console_input_priority = false;
 }
 
 static void console_vm_input_sync(uint16_t vmid)
@@ -318,6 +373,11 @@ static bool console_vm_input_has_non_enter(void)
 	}
 
 	return has_non_enter;
+}
+
+static bool console_vm_input_pending_for_drain(void)
+{
+	return vm_console_input_priority || !console_vm_input_empty();
 }
 
 bool console_vm_input_get_stats(struct console_vm_input_stats *stats)
@@ -391,10 +451,11 @@ static void console_vm_input_drop_one(void)
 	}
 }
 
-static void console_vm_input_collect(uint16_t target_vmid)
+static bool console_vm_input_collect(uint16_t target_vmid)
 {
 	uint32_t budget = VM_CONSOLE_INPUT_COLLECT_BUDGET;
 	char ch = -1;
+	bool collected = false;
 
 	console_vm_input_sync(target_vmid);
 	/*
@@ -412,14 +473,17 @@ static void console_vm_input_collect(uint16_t target_vmid)
 		}
 		budget--;
 		if (ch == GUEST_CONSOLE_TO_HV_SWITCH_KEY) {
-			console_vm_ring_drain_internal(target_vmid);
+			console_vm_vuart_unbind(target_vmid);
 			console_vmid = ACRN_INVALID_VMID;
 			console_vm_input_reset(ACRN_INVALID_VMID);
 			printf("\r\n\r\n──────── [switch to BEAU shell] ────────\r\n");
 			break;
 		}
 		(void)console_vm_input_put(ch);
+		collected = true;
 	}
+
+	return collected;
 }
 
 static bool console_vm_input_push_to_guest(struct acrn_vuart *vu)
@@ -457,6 +521,21 @@ bool console_vm_rx_refill(struct acrn_vuart *vu)
 	return console_vm_input_push_to_guest(vu);
 }
 
+static uint32_t console_vm_ring_budget_from_queued(uint32_t queued, bool input_pending)
+{
+	uint32_t budget = (queued >= VM_CONSOLE_DRAIN_BURST_THRESHOLD) ?
+		VM_CONSOLE_DRAIN_BURST_BUDGET : VM_CONSOLE_DRAIN_BUDGET;
+
+	if (budget > VM_CONSOLE_INTERACTIVE_DRAIN_BUDGET) {
+		budget = VM_CONSOLE_INTERACTIVE_DRAIN_BUDGET;
+	}
+	if (input_pending && (budget > VM_CONSOLE_INPUT_PENDING_DRAIN_BUDGET)) {
+		budget = VM_CONSOLE_INPUT_PENDING_DRAIN_BUDGET;
+	}
+
+	return budget;
+}
+
 static uint32_t console_vm_ring_drain_budget(struct vm_console_ringbuf *rb)
 {
 	uint64_t rflags;
@@ -466,14 +545,7 @@ static uint32_t console_vm_ring_drain_budget(struct vm_console_ringbuf *rb)
 	queued = console_ring_queued(rb->prod, rb->cons, VM_CONSOLE_RINGBUF_CAPACITY);
 	spinlock_irqrestore_release(&rb->lock, rflags);
 
-	return (queued >= VM_CONSOLE_DRAIN_BURST_THRESHOLD) ?
-		VM_CONSOLE_DRAIN_BURST_BUDGET : VM_CONSOLE_DRAIN_BUDGET;
-}
-
-static uint32_t console_vm_ring_budget_from_queued(uint32_t queued)
-{
-	return (queued >= VM_CONSOLE_DRAIN_BURST_THRESHOLD) ?
-		VM_CONSOLE_DRAIN_BURST_BUDGET : VM_CONSOLE_DRAIN_BUDGET;
+	return console_vm_ring_budget_from_queued(queued, console_vm_input_pending_for_drain());
 }
 
 bool console_vm_ring_get_stats(uint16_t vmid, struct console_vm_ring_stats *stats)
@@ -481,16 +553,19 @@ bool console_vm_ring_get_stats(uint16_t vmid, struct console_vm_ring_stats *stat
 	struct vm_console_ringbuf *rb;
 	uint64_t rflags;
 	uint32_t queued;
+	bool bound;
 	bool valid = false;
 
 	if ((stats != NULL) && (vmid < CONFIG_VM_CONSOLE_RINGBUF_VM_NUM)) {
 		rb = &vm_console_ringbufs[vmid];
 		spinlock_irqsave_obtain(&rb->lock, &rflags);
 		queued = console_ring_queued(rb->prod, rb->cons, VM_CONSOLE_RINGBUF_CAPACITY);
+		bound = rb->vuart_bound;
 		stats->vmid = vmid;
 		stats->size = CONFIG_VM_CONSOLE_RINGBUF_SIZE;
 		stats->capacity = VM_CONSOLE_RINGBUF_CAPACITY;
-		stats->drain_budget = console_vm_ring_budget_from_queued(queued);
+		stats->drain_budget = bound ? console_vm_ring_budget_from_queued(queued,
+			(console_vmid == vmid) && console_vm_input_pending_for_drain()) : 0U;
 		stats->queued = queued;
 		stats->high_water = rb->high_water;
 		stats->input_bytes = rb->input_bytes;
@@ -501,6 +576,7 @@ bool console_vm_ring_get_stats(uint16_t vmid, struct console_vm_ring_stats *stat
 		stats->last_overflow_tsc = rb->last_overflow_tsc;
 		stats->pending = rb->pending;
 		stats->draining = rb->draining;
+		stats->vuart_bound = bound;
 		spinlock_irqrestore_release(&rb->lock, rflags);
 		valid = true;
 	}
@@ -653,12 +729,14 @@ static void vuart_console_rx_chars(struct acrn_vuart *vu)
 {
 	uint16_t target_vmid = console_vmid;
 	bool recv = false;
+	bool collected;
 
-	console_vm_input_collect(target_vmid);
+	collected = console_vm_input_collect(target_vmid);
 	vm_console_input_guest_budget = VM_CONSOLE_RX_BUDGET;
 	while (console_vm_input_push_to_guest(vu)) {
 		recv = true;
 	}
+	vm_console_input_priority = collected || !console_vm_input_empty();
 	if (!recv && (vu != NULL) && (console_vmid == target_vmid) &&
 		vuart_rx_pending(vu) && console_vm_input_has_non_enter()) {
 		/*
@@ -668,6 +746,7 @@ static void vuart_console_rx_chars(struct acrn_vuart *vu)
 		 * pending command, without replaying pure Enter key-repeat bursts.
 		 */
 		recv = true;
+		vm_console_input_priority = true;
 	}
 
 	if (recv && (vu != NULL) && (console_vmid == target_vmid)) {
@@ -686,6 +765,7 @@ static struct acrn_vuart *vuart_console_active(void)
 			vu = vm_console_vuart(vm);
 		} else {
 			/* Console vm is invalid, switch back to HV-Shell */
+			console_vm_vuart_unbind(console_vmid);
 			console_vmid = ACRN_INVALID_VMID;
 		}
 	}
@@ -697,20 +777,22 @@ static bool console_vm_ring_drain_begin(struct vm_console_ringbuf *rb)
 {
 	uint64_t rflags;
 	bool draining;
+	bool bound;
 
 	spinlock_irqsave_obtain(&rb->lock, &rflags);
 	/*
-	 * The timer path, Ctrl-D switch path, and vsh command can all request a
-	 * drain. One active drain is enough because it claims bytes by advancing
-	 * cons; nested drains would only interleave prefixes and serial writes.
+	 * Only the bound host vuart drains guest output to the physical UART.
+	 * One active drain is enough because it claims bytes by advancing cons;
+	 * nested drains would only interleave prefixes and serial writes.
 	 */
 	draining = rb->draining;
-	if (!draining) {
+	bound = rb->vuart_bound;
+	if (!draining && bound) {
 		rb->draining = true;
 	}
 	spinlock_irqrestore_release(&rb->lock, rflags);
 
-	return !draining;
+	return !draining && bound;
 }
 
 static void console_vm_ring_drain_end(struct vm_console_ringbuf *rb)
@@ -915,9 +997,12 @@ static void console_vm_ring_drain_internal(uint16_t vmid)
 		rb = &vm_console_ringbufs[vmid];
 		if (console_vm_ring_drain_begin(rb)) {
 			/*
-			 * Host serial output is synchronous. Use a regular budget for
-			 * interactive output, then a bounded burst for deep boot-log
-			 * backlog so vsh handoff catches up without replaying forever.
+			 * 2026-07-01, vuart live-drain pacing:
+			 *
+			 * Guest TX can be much faster than the physical serial backend.
+			 * Keep each bound-vuart pass small, and shrink it again when
+			 * host input is waiting, so long guest output cannot hide Ctrl-D
+			 * or the next typed command behind a large synchronous write.
 			 */
 			budget = console_vm_ring_drain_budget(rb);
 			do {
